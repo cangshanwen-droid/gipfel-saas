@@ -1,0 +1,18 @@
+[project]
+name = "gipfel-saas"
+version = "2.0.0"
+description = "Gipfel 模拟系统 SaaS 版 — 基础设施合同管理 + 区域模拟"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "sqlalchemy>=2.0",
+    "psycopg2-binary>=2.9",
+    "alembic>=1.14",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    "python-multipart>=0.0.18",
+    "pydantic>=2.10",
+    "openpyxl>=3.1",
+    "slowapi>=0.1",
+]
