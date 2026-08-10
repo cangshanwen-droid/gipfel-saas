@@ -739,7 +739,15 @@ def delete_contract(contract_id: int, db: Session = Depends(get_db), user: User 
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c:
         raise HTTPException(404, "合同不存在")
+    # 交付验收修复：已入账合同禁止删除（防 id 复用后流水误判幂等）
+    if c.status in ("active", "completed"):
+        raise HTTPException(400, "已执行或已完成的合同不能删除，请使用「终止合同」")
     old_row = _contract_row(db, c)
+    # 同步清理关联流水（防 AUTOINCREMENT 重置后新合同复用 id 命中旧流水）
+    db.query(AccountTransaction).filter(
+        AccountTransaction.contract_id == contract_id,
+        AccountTransaction.source_type == "contract",
+    ).delete(synchronize_session=False)
     db.delete(c)
     insert_audit_log(db, username=user.username, role=user.role, action="delete", target="contract",
                      target_id=contract_id,
