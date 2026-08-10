@@ -1,10 +1,14 @@
 """认证路由"""
-from fastapi import APIRouter, Depends, HTTPException
+import os
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
+from typing import Optional, List
 from ..database import get_db
 from ..models import User
-from ..auth import hash_password, verify_password, create_access_token, check_login_limit, record_login_attempt, get_current_user
+from ..auth import hash_password, verify_password, create_access_token, check_login_limit, record_login_attempt, get_current_user, get_admin_user
+from ..services.audit import insert_audit_log
 
 router = APIRouter()
 
@@ -33,12 +37,84 @@ def login(req: LoginReq, db: Session = Depends(get_db)):
         raise HTTPException(401, "用户名或密码错误")
 
     record_login_attempt(req.username, True)
+    user.last_login = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    insert_audit_log(db, username=req.username, role=user.role, action="login", target="auth",
+                     target_id=user.id, result="success")
+    db.commit()
     token = create_access_token(user.id, user.username, user.role)
     return {"token": token, "user": {"id": user.id, "username": user.username, "role": user.role}}
 
 
+@router.post("/logout")
+def logout(user: User = Depends(get_current_user)):
+    """无状态 JWT：服务端无需销毁会话，仅返回成功（客户端清除本地 token）。"""
+    return {"success": True}
+
+
+@router.get("/users")
+def list_users(db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
+    """管理端用户列表（对齐桌面端 AUTH_LIST_USERS）。"""
+    rows = db.query(User).order_by(User.id).all()
+    result = []
+    for u in rows:
+        result.append({
+            "id": u.id,
+            "username": u.username,
+            "role": u.role,
+            "created_at": u.created_at.isoformat(sep=" ") if u.created_at else None,
+            "last_login": u.last_login,
+        })
+    return result
+
+
+class ResetPasswordReq(BaseModel):
+    new_password: str
+
+
+@router.post("/users/{user_id}/reset-password")
+def reset_password(user_id: int, data: ResetPasswordReq, db: Session = Depends(get_db),
+                   admin: User = Depends(get_admin_user)):
+    """管理员重置任意用户密码（对齐桌面端 AUTH_RESET_PASSWORD 校验规则）。"""
+    new_pwd = data.new_password
+    if len(new_pwd) < 6:
+        raise HTTPException(400, "新密码至少6个字符")
+    if not any(ch.isalpha() for ch in new_pwd) or not any(ch.isdigit() for ch in new_pwd):
+        raise HTTPException(400, "新密码需包含字母和数字")
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(404, "用户不存在")
+    target.password = hash_password(new_pwd)
+    insert_audit_log(db, username=admin.username, role=admin.role, action="reset_password",
+                     target="user", target_id=user_id,
+                     new_value=f'{{"username": "{target.username}", "role": "{target.role}"}}')
+    db.commit()
+    return {"success": True, "isSelf": admin.id == user_id}
+
+
+@router.delete("/users/{user_id}")
+def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depends(get_admin_user)):
+    """管理员删除用户（不允许删除自己）。"""
+    if admin.id == user_id:
+        raise HTTPException(400, "不能删除当前登录的管理员账号")
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(404, "用户不存在")
+    insert_audit_log(db, username=admin.username, role=admin.role, action="delete",
+                     target="user", target_id=user_id,
+                     old_value=f'{{"username": "{target.username}", "role": "{target.role}"}}')
+    db.delete(target)
+    db.commit()
+    return {"success": True}
+
+
 @router.post("/register")
-def register(req: RegisterReq, db: Session = Depends(get_db)):
+def register(req: RegisterReq, db: Session = Depends(get_db), x_admin_key: str = Header(default="")):
+    # 安全验收 P0：注册接口要求管理密钥，公网匿名注册一律拒绝。
+    # 内部使用场景：账号由桌面端统一登录自动建号（/auth/login 自动创建），
+    # 或管理员在桌面端用户管理创建后同步；不提供公网自助注册。
+    expected = os.environ.get("ADMIN_KEY", "")
+    if not expected or x_admin_key != expected:
+        raise HTTPException(403, "无管理权限，注册已关闭")
     if len(req.username) < 2:
         raise HTTPException(400, "用户名至少2个字符")
     if len(req.password) < 6:

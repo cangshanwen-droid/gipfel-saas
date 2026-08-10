@@ -97,6 +97,16 @@ def seed_all(db: Session):
                        carbon_emissions=carbon, population_capacity=cap,
                        base_growth_rate=rate))
 
+    # 区域主账户（交付验收发现：云端缺主账户导致合同支出无账户可扣，
+    # 与本地 getOrCreateRegionMasterAccount 行为对齐——每个区域一个主账户）
+    db.flush()
+    regions = db.query(Region).all()
+    for r in regions:
+        db.add(RegionAccount(
+            region_id=r.id, account_name=f"{r.name}主账户",
+            balance=100000.0, is_master=1
+        ))
+
     # 公司
     for name, region, ctype, contact in DEFAULT_COMPANIES:
         db.add(Company(name=name, region=region, company_type=ctype, contact=contact))

@@ -3,7 +3,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
-from .routes import auth, regions, companies, contracts, dashboard, formula, reports, infra, accounts, excel
+from .routes import (
+    auth, regions, companies, contracts, dashboard, formula, reports, infra,
+    accounts, excel, announcements, audit, notifications, backup,
+)
 
 
 @asynccontextmanager
@@ -43,6 +46,10 @@ app.include_router(reports.router, prefix="/api/reports", tags=["报表"])
 app.include_router(infra.router, prefix="/api/infra", tags=["基建"])
 app.include_router(accounts.router, prefix="/api/accounts", tags=["财务"])
 app.include_router(excel.router, prefix="/api/excel", tags=["Excel"])
+app.include_router(announcements.router, prefix="/api/announcements", tags=["公告"])
+app.include_router(audit.router, prefix="/api/audit", tags=["审计"])
+app.include_router(notifications.router, prefix="/api/notifications", tags=["通知"])
+app.include_router(backup.router, prefix="/api/backup", tags=["备份"])
 
 
 @app.get("/api/health")

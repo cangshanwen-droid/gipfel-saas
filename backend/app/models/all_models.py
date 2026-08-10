@@ -68,6 +68,15 @@ class Contract(Base):
     sign_date = Column(String, nullable=True)
     status = Column(String, default="draft")
     notes = Column(Text, default="")
+    # ── P0-2 补字段：与桌面端 Contract 类型对齐 ──
+    total_cost = Column(Float, default=0)          # 合同级总成本（含税，create/update 时由明细计算）
+    expected_income = Column(Float, default=0)     # 合同级预期收入
+    approval_status = Column(String, default="none")  # none / pending / approved / rejected
+    approved_by = Column(String, default="")
+    approved_at = Column(String, nullable=True)    # 审批时间（本地 SQLite 为 'YYYY-MM-DD HH:MM:SS' 文本）
+    progress = Column(Float, default=0)
+    created_by = Column(String, default="")
+    updated_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, default=None)
@@ -95,6 +104,9 @@ class ContractItem(Base):
     tax_rate = Column(Float, default=0)
     skill_level = Column(Float, default=0)
     carbon_factor = Column(Float, default=0)
+    # P0-2 补字段：明细级金额（投资合同=投资总额/预期收益、拨款合同=拨款金额）
+    total_cost = Column(Float, nullable=True, default=None)      # None=未显式录入（按数量×单价推算）
+    expected_income = Column(Float, nullable=True, default=None)
     sort_order = Column(Integer, default=0)
 
     contract = relationship("Contract", back_populates="items")
@@ -110,11 +122,13 @@ class ContractItem(Base):
 
     @property
     def tax_amount(self):
-        return round(self.quantity * self.unit_price * self.tax_rate, 2)
+        # P0-3 税率口径修复：tax_rate 为百分比（13=13%），与桌面端 v20 生成列一致
+        return round(self.quantity * self.unit_price * self.tax_rate / 100, 2)
 
     @property
     def total(self):
-        return self.quantity * self.unit_price * (1 + self.tax_rate)
+        # P0-3 税率口径修复：含税总价 = 不含税 × (1 + 税率/100)
+        return self.quantity * self.unit_price * (1 + self.tax_rate / 100)
 
     __table_args__ = (Index("idx_contract_items_contract", "contract_id"),)
 
@@ -177,6 +191,7 @@ class User(Base):
     salt = Column(String, default="")
     role = Column(String, default="user")  # admin / user
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, default=None)
+    last_login = Column(String, nullable=True)  # 最近登录时间（系统概览活跃用户统计）
     created_at = Column(DateTime, default=datetime.utcnow)
 
 # ── 10. region_accounts ──────────────────────────
@@ -200,6 +215,10 @@ class AccountTransaction(Base):
     amount = Column(Float, nullable=False)
     description = Column(String, default="")
     fiscal_year = Column(Integer, nullable=True)
+    # 与桌面端对齐：合同联动流水标记（幂等防重复入账）
+    operator = Column(String, default="")
+    contract_id = Column(Integer, nullable=True)
+    source_type = Column(String, default="manual")  # manual / contract
     created_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
@@ -222,3 +241,72 @@ class Organization(Base):
     plan = Column(String, default="free")  # free / pro / enterprise
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ── P0-1 新增：合同版本历史（对齐桌面端 contract_versions 表）─────
+class ContractVersion(Base):
+    __tablename__ = "contract_versions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    contract_id = Column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
+    version = Column(Integer, nullable=False)
+    snapshot = Column(Text, nullable=False)        # JSON：字段快照
+    changed_fields = Column(Text, default="[]")    # JSON：变更字段列表
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_contract_versions_contract", "contract_id"),
+    )
+
+
+# ── P0-1 新增：公告（对齐桌面端 announcements 表）─────
+class Announcement(Base):
+    __tablename__ = "announcements"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    region_id = Column(Integer, ForeignKey("regions.id"), nullable=True)
+    priority = Column(String, default="normal")  # high / normal / low
+    created_by = Column(String, default="")
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ── P0-1 新增：通知中心（对齐桌面端 notifications 表）─────
+class Notification(Base):
+    __tablename__ = "notifications"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String, nullable=False)
+    content = Column(Text, default="")
+    type = Column(String, default="system")  # approval / announcement / transaction / system
+    link = Column(String, default="")
+    read = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_notifications_user", "user_id", "read"),
+    )
+
+
+# ── P0-1 新增：审计日志（对齐桌面端 audit_logs 表）─────
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String, default="")
+    role = Column(String, default="")
+    action = Column(String, nullable=False)
+    target = Column(String, default="")
+    target_id = Column(Integer, nullable=True)
+    old_value = Column(Text, nullable=True)
+    new_value = Column(Text, nullable=True)
+    ip = Column(String, nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    result = Column(String, default="success")
+
+    __table_args__ = (
+        Index("idx_audit_timestamp", "timestamp"),
+        Index("idx_audit_username", "username"),
+        Index("idx_audit_action", "action"),
+    )
