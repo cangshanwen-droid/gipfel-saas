@@ -2,7 +2,7 @@
 from sqlalchemy.orm import Session
 from ..models import (
     Region, Company, ContractType, InfrastructureType,
-    InfraEmploymentBonus, User, RegionAccount
+    InfraEmploymentBonus, User, RegionAccount, Organization
 )
 from ..auth import hash_password
 
@@ -68,8 +68,43 @@ DEFAULT_COMPANIES = [
 ]
 
 
+def _backfill_organizations(db: Session):
+    """幂等回填（每次启动执行，公司绑定对齐）：
+
+    - organizations 表为空时先建默认组织；
+    - 无 org_id 的公司 → 按公司名建同名组织（公司→组织 1:1 同步，组织已存在则复用）；
+    - 无 org_id 的用户 → 挂到默认组织。
+
+    保证 login 返回的 org_id / users 列表的 org_name 对存量数据生效，
+    否则 organizations 表全空时 org 字段恒为 NULL（公司绑定无法对齐）。
+    """
+    org = db.query(Organization).filter(Organization.name == "默认组织").first()
+    if not org:
+        org = Organization(name="默认组织")
+        db.add(org)
+        db.flush()
+
+    # 公司 → 同名组织（Organization.name 唯一，同名公司复用已有组织）
+    for comp in db.query(Company).filter(Company.org_id.is_(None)).all():
+        existing = db.query(Organization).filter(Organization.name == comp.name).first()
+        if existing:
+            comp.org_id = existing.id
+        else:
+            org_comp = Organization(name=comp.name)
+            db.add(org_comp)
+            db.flush()
+            comp.org_id = org_comp.id
+
+    for u in db.query(User).filter(User.org_id.is_(None)).all():
+        u.org_id = org.id
+
+    db.commit()
+
+
 def seed_all(db: Session):
-    """只在空数据库时执行"""
+    """只在空数据库时执行（组织回填除外，每次启动都跑且幂等）"""
+    _backfill_organizations(db)
+
     if db.query(ContractType).count() > 0:
         return
 
@@ -115,3 +150,6 @@ def seed_all(db: Session):
     db.add(User(username="admin", password=hash_password("admin"), role="admin"))
 
     db.commit()
+
+    # 新库刚 seed 的公司/用户无 org_id，再跑一次回填让首启即完成公司→组织映射
+    _backfill_organizations(db)

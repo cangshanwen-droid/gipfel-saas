@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from ..database import get_db
-from ..models import Company
+from ..models import Company, Organization
 from ..auth import get_current_user
 
 router = APIRouter()
@@ -44,6 +44,12 @@ def get_company(company_id: int, db: Session = Depends(get_db), _=Depends(get_cu
 def create_company(data: CompanyCreate, db: Session = Depends(get_db), _=Depends(get_current_user)):
     c = Company(**data.model_dump())
     db.add(c)
+    db.flush()
+    # 公司→组织 1:1 同步（用户绑定 org_id 指向 organizations，须与公司实时对应；
+    # 组织独立于公司表，公司 id 与组织 id 通过同名映射关联）
+    existing_org = db.query(Organization).filter(Organization.name == c.name).first()
+    if not existing_org:
+        db.add(Organization(name=c.name))
     db.commit()
     db.refresh(c)
     return c

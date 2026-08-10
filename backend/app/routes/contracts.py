@@ -325,6 +325,8 @@ def _notify_approval(db: Session, contract: Contract, action: str):
 @router.get("")
 def list_contracts(
     region_id: Optional[int] = Query(None),
+    # 公司绑定对齐：?company_id=N 按 party_b_id 过滤（桌面端 CONTRACT_LIST companyId 的云端落点）
+    company_id: Optional[int] = Query(None),
     # P1-1 分页：limit/offset 与 page/page_size 两种风格都支持；
     # 传了任一参数即返回 {items, total, page, page_size}，否则返回裸数组（兼容旧调用方）。
     limit: Optional[int] = Query(None, ge=1, le=10000),
@@ -349,6 +351,9 @@ def list_contracts(
     )
     if region_id:
         q = q.filter(Contract.region_id == region_id)
+    # 公司过滤用 is not None 判断（company_id=0 也是显式值，不能用 truthy）
+    if company_id is not None:
+        q = q.filter(Contract.party_b_id == company_id)
     total = q.count()
     q = q.order_by(Contract.created_at.desc())
 

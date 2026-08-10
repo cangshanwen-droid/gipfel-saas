@@ -5,8 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
-from ..database import get_db
-from ..models import User
+from ..database import get_db, commit_with_retry
+from ..models import User, Organization
 from ..auth import hash_password, verify_password, create_access_token, check_login_limit, record_login_attempt, get_current_user, get_admin_user
 from ..services.audit import insert_audit_log
 
@@ -20,6 +20,8 @@ class LoginReq(BaseModel):
 class RegisterReq(BaseModel):
     username: str
     password: str
+    # 公司绑定对齐：可选 org_id（桌面端 AUTH_CREATE_USER 传 companyId 时的云端落点）
+    org_id: Optional[int] = None
 
 class ChangePasswordReq(BaseModel):
     old_password: str
@@ -42,7 +44,8 @@ def login(req: LoginReq, db: Session = Depends(get_db)):
                      target_id=user.id, result="success")
     db.commit()
     token = create_access_token(user.id, user.username, user.role)
-    return {"token": token, "user": {"id": user.id, "username": user.username, "role": user.role}}
+    # 公司绑定对齐：返回 org_id（用户归属组织，与桌面端 company_id 对应）
+    return {"token": token, "user": {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id}}
 
 
 @router.post("/logout")
@@ -53,22 +56,55 @@ def logout(user: User = Depends(get_current_user)):
 
 @router.get("/users")
 def list_users(db: Session = Depends(get_db), _: User = Depends(get_admin_user)):
-    """管理端用户列表（对齐桌面端 AUTH_LIST_USERS）。"""
-    rows = db.query(User).order_by(User.id).all()
+    """管理端用户列表（对齐桌面端 AUTH_LIST_USERS，联表返回 org_id/org_name）。"""
+    rows = db.query(User, Organization.name).outerjoin(
+        Organization, Organization.id == User.org_id
+    ).order_by(User.id).all()
     result = []
-    for u in rows:
+    for u, org_name in rows:
         result.append({
             "id": u.id,
             "username": u.username,
             "role": u.role,
+            "org_id": u.org_id,
+            "org_name": org_name,
             "created_at": u.created_at.isoformat(sep=" ") if u.created_at else None,
             "last_login": u.last_login,
         })
     return result
 
 
+class CreateUserReq(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+    org_id: Optional[int] = None
+
+
 class ResetPasswordReq(BaseModel):
     new_password: str
+
+
+@router.post("/users")
+def create_user(data: CreateUserReq, db: Session = Depends(get_db),
+                admin: User = Depends(get_admin_user)):
+    """管理端创建用户（对齐桌面端 AUTH_CREATE_USER，支持公司绑定 org_id）。"""
+    if len(data.username) < 2:
+        raise HTTPException(400, "用户名至少2个字符")
+    if len(data.password) < 6:
+        raise HTTPException(400, "密码至少6个字符")
+    if db.query(User).filter(User.username == data.username).first():
+        raise HTTPException(400, "用户名已存在")
+    if data.org_id is not None:
+        org = db.query(Organization).filter(Organization.id == data.org_id).first()
+        if not org:
+            raise HTTPException(400, "所属公司不存在")
+    user = User(username=data.username, password=hash_password(data.password),
+                role=data.role if data.role in ("admin", "operator", "user", "rep") else "user",
+                org_id=data.org_id)
+    db.add(user)
+    commit_with_retry(db)
+    return {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id}
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -122,7 +158,7 @@ def register(req: RegisterReq, db: Session = Depends(get_db), x_admin_key: str =
     if db.query(User).filter(User.username == req.username).first():
         raise HTTPException(400, "用户名已存在")
 
-    user = User(username=req.username, password=hash_password(req.password), role="user")
+    user = User(username=req.username, password=hash_password(req.password), role="user", org_id=req.org_id)
     db.add(user)
     db.commit()
     return {"message": "注册成功"}
@@ -141,4 +177,4 @@ def change_password(req: ChangePasswordReq, user: User = Depends(get_current_use
 
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
-    return {"id": user.id, "username": user.username, "role": user.role}
+    return {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id}
