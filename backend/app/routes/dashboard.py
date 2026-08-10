@@ -1,5 +1,6 @@
 """仪表盘 + 基建类型"""
 from fastapi import APIRouter, Depends
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Region, Contract, Company, ContractItem, InfrastructureType
@@ -18,6 +19,25 @@ def dashboard_summary(db: Session = Depends(get_db), _=Depends(get_current_user)
     avg_happiness = db.query(Region).filter(Region.current_happiness.isnot(None)).all()
     avg_employment = db.query(Region).filter(Region.current_employment_rate.isnot(None)).all()
 
+    # P1-1 扩展：合同状态分布 + 待审批计数 + 最近 6 条合同，
+    # 渲染端 Dashboard 不再拉 CONTRACT_LIST 全表，避免云库增长后每次拖全量。
+    status_counts = {}
+    for status, cnt in db.query(Contract.status, func.count(Contract.id)).group_by(Contract.status).all():
+        status_counts[status or "draft"] = cnt
+    approval_pending = (
+        db.query(Contract).filter(Contract.approval_status == "pending").count()
+    )
+    recent_contracts = [
+        {
+            "id": c.id,
+            "contract_no": c.contract_no,
+            "contract_name": c.contract_name,
+            "status": c.status,
+            "created_at": c.created_at.isoformat(sep=" ") if c.created_at else None,
+        }
+        for c in db.query(Contract).order_by(Contract.created_at.desc()).limit(6).all()
+    ]
+
     return {
         "total_regions": total_regions,
         "total_contracts": total_contracts,
@@ -25,6 +45,9 @@ def dashboard_summary(db: Session = Depends(get_db), _=Depends(get_current_user)
         "total_land_area": round(total_land_area, 2),
         "avg_happiness": round(sum(r.current_happiness for r in avg_happiness) / max(len(avg_happiness), 1), 2),
         "avg_employment": round(sum(r.current_employment_rate for r in avg_employment) / max(len(avg_employment), 1), 2),
+        "contract_status_counts": status_counts,
+        "contract_approval_pending": approval_pending,
+        "recent_contracts": recent_contracts,
     }
 
 

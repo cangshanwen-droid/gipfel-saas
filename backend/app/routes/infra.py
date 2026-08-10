@@ -10,6 +10,13 @@ from ..auth import get_current_user
 router = APIRouter()
 
 
+@router.get("/types")
+def list_infra_types(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """列出所有基建类型"""
+    types = db.query(InfrastructureType).order_by(InfrastructureType.name).all()
+    return [{"id": t.id, "name": t.name, "category": t.category, "recommended_ratio": t.recommended_ratio, "carbon_reduction": t.carbon_reduction} for t in types]
+
+
 @router.get("/calculate")
 def infra_calculate(
     region_id: int = Query(...),

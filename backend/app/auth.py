@@ -12,8 +12,10 @@ from .models import User
 
 security = HTTPBearer()
 
+from typing import Dict, Tuple
+
 # ── 登录限流 ─────────────────────────────────────
-_login_attempts: dict[str, tuple[int, float]] = {}  # username -> (count, reset_time)
+_login_attempts: Dict[str, Tuple[int, float]] = {}  # username -> (count, reset_time)
 
 def check_login_limit(username: str) -> bool:
     now = time.time()

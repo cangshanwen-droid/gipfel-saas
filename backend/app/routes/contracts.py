@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
-from ..database import get_db
-from ..models import Contract, ContractItem, ContractType, Region
+from ..database import get_db, commit_with_retry
+from ..models import Contract, ContractItem, ContractType, Region, Company
 from ..auth import get_current_user
 
 router = APIRouter()
@@ -34,18 +34,76 @@ class ContractCreate(BaseModel):
 
 
 @router.get("")
-def list_contracts(region_id: Optional[int] = Query(None), db: Session = Depends(get_db), _=Depends(get_current_user)):
-    q = db.query(Contract)
+def list_contracts(
+    region_id: Optional[int] = Query(None),
+    # P1-1 分页：两种风格都支持——
+    #   limit/offset（cloudApi contract:list 默认 limit=200）
+    #   page/page_size（REST 风格，审计建议）
+    # 传了任一参数即返回 {items, total, page, page_size}，否则返回裸数组（兼容旧调用方）。
+    limit: Optional[int] = Query(None, ge=1, le=10000),
+    offset: int = Query(0, ge=0),
+    page: Optional[int] = Query(None, ge=1),
+    page_size: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """合同列表 — LEFT JOIN 返回 contract_type_name/region_name/company_name，与桌面端 contract.repo.ts 一致"""
+    q = (
+        db.query(
+            Contract,
+            ContractType.name.label("contract_type_name"),
+            Region.name.label("region_name"),
+            Company.name.label("company_name"),
+        )
+        .outerjoin(ContractType, ContractType.id == Contract.contract_type_id)
+        .outerjoin(Region, Region.id == Contract.region_id)
+        .outerjoin(Company, Company.id == Contract.party_b_id)
+    )
     if region_id:
         q = q.filter(Contract.region_id == region_id)
-    return q.order_by(Contract.created_at.desc()).all()
+    total = q.count()
+    q = q.order_by(Contract.created_at.desc())
+
+    paginated = False
+    cur_page = 1
+    eff_page_size = page_size
+    if limit is not None:
+        q = q.offset(offset).limit(limit)
+        paginated = True
+        cur_page = offset // limit + 1 if limit > 0 else 1
+        eff_page_size = limit
+    elif page is not None:
+        q = q.offset((page - 1) * page_size).limit(page_size)
+        paginated = True
+        cur_page = page
+
+    rows = q.all()
+    result = []
+    for contract, ct_name, region_name, company_name in rows:
+        item = {col.name: getattr(contract, col.name) for col in Contract.__table__.columns}
+        item["contract_type_name"] = ct_name
+        item["region_name"] = region_name
+        item["company_name"] = company_name
+        # DateTime → ISO 字符串（与桌面端本地 SQLite 的 'YYYY-MM-DD HH:MM:SS' 文本对齐）
+        if isinstance(item.get("created_at"), datetime):
+            item["created_at"] = item["created_at"].isoformat(sep=" ")
+        if isinstance(item.get("updated_at"), datetime):
+            item["updated_at"] = item["updated_at"].isoformat(sep=" ")
+        result.append(item)
+    if paginated:
+        return {"items": result, "total": total, "page": cur_page, "page_size": eff_page_size}
+    return result
 
 
 @router.get("/{contract_id}")
 def get_contract(contract_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c: raise HTTPException(404, "合同不存在")
-    return c
+    result = {col.name: getattr(c, col.name) for col in Contract.__table__.columns}
+    result["contract_type_name"] = c.contract_type.name if c.contract_type else None
+    result["region_name"] = c.region.name if c.region else None
+    result["company_name"] = c.party_b.name if c.party_b else None
+    return result
 
 
 @router.post("")
@@ -83,7 +141,8 @@ def create_contract(data: ContractCreate, db: Session = Depends(get_db), _=Depen
             sort_order=idx,
         ))
 
-    db.commit()
+    # P1-3：WAL + busy_timeout 兜底，极端并发提交冲突时退避重试（2 次）
+    commit_with_retry(db)
     db.refresh(contract)
     return contract
 
@@ -93,7 +152,8 @@ def delete_contract(contract_id: int, db: Session = Depends(get_db), _=Depends(g
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c: raise HTTPException(404, "合同不存在")
     db.delete(c)
-    db.commit()
+    # P1-3：写提交退避重试（WAL 下锁冲突已大幅减少，极端并发仍可能 locked）
+    commit_with_retry(db)
     return {"success": True}
 
 
