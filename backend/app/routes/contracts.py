@@ -347,10 +347,12 @@ def list_contracts(
     page: Optional[int] = Query(None, ge=1),
     page_size: int = Query(200, ge=1, le=1000),
     db: Session = Depends(get_db),
-    _=Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     """合同列表 — LEFT JOIN 返回 contract_type_name/region_name/company_name，
-    P0-2：批量加载 items 随列表返回（单次 IN 查询避免 N+1）。"""
+    P0-2：批量加载 items 随列表返回（单次 IN 查询避免 N+1）。
+    H2 修复（2026-08-11 业务审核）：数据隔离——rep/user 角色强制只看本公司合同
+    （user.org_id → company），忽略前端传入 company_id（防绕过）。admin/operator 看全部。"""
     q = (
         db.query(
             Contract,
@@ -367,6 +369,14 @@ def list_contracts(
     # 公司过滤用 is not None 判断（company_id=0 也是显式值，不能用 truthy）
     if company_id is not None:
         q = q.filter(Contract.party_b_id == company_id)
+    # ── H2 数据隔离：非 admin/operator 强制本公司（防客户端传空 company_id 绕过）──
+    if user.role not in ("admin", "operator") and user.org_id:
+        my_company = db.query(Company.id).filter(Company.org_id == user.org_id).scalar()
+        if my_company:
+            q = q.filter(Contract.party_b_id == my_company)
+        else:
+            # 无绑定公司 → 看不到任何合同（隔离原则）
+            q = q.filter(Contract.id == -1)
     total = q.count()
     q = q.order_by(Contract.created_at.desc())
 
@@ -466,10 +476,17 @@ def summarize_region(region_id: int, db: Session = Depends(get_db), _=Depends(ge
 # 注意：/{contract_id} 及其子路由必须注册在 /types/all、/summarize/... 之后，
 # 保证「types / summarize」等字面量路径优先匹配（FastAPI 按注册顺序匹配同段数路由）。
 @router.get("/{contract_id}")
-def get_contract(contract_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_contract(contract_id: int, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
+    """合同详情（H2 修复：非 admin/operator 仅可看本公司合同）"""
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c:
         raise HTTPException(404, "合同不存在")
+    # H2 数据隔离：非 admin/operator 仅可看本公司合同
+    if user.role not in ("admin", "operator") and user.org_id:
+        my_company = db.query(Company.id).filter(Company.org_id == user.org_id).scalar()
+        if not my_company or c.party_b_id != my_company:
+            raise HTTPException(403, "无权查看其他公司的合同")
     return _contract_row(db, c)
 
 

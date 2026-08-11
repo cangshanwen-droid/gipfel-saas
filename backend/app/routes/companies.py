@@ -48,8 +48,13 @@ def create_company(data: CompanyCreate, db: Session = Depends(get_db), _=Depends
     # 公司→组织 1:1 同步（用户绑定 org_id 指向 organizations，须与公司实时对应；
     # 组织独立于公司表，公司 id 与组织 id 通过同名映射关联）
     existing_org = db.query(Organization).filter(Organization.name == c.name).first()
-    if not existing_org:
-        db.add(Organization(name=c.name))
+    if existing_org:
+        c.org_id = existing_org.id
+    else:
+        org = Organization(name=c.name)
+        db.add(org)
+        db.flush()
+        c.org_id = org.id
     db.commit()
     db.refresh(c)
     return c
