@@ -125,7 +125,6 @@ def add_transaction(data: TransactionCreate, db: Session = Depends(get_db),
         raise HTTPException(404, "账户不存在")
     if data.trans_type == "expense" and (account.balance or 0) < amount:
         raise HTTPException(400, f"余额不足：账户余额 {(account.balance or 0):.2f}")
-
     txn = AccountTransaction(
         account_id=data.account_id,
         trans_type=data.trans_type,
@@ -138,9 +137,29 @@ def add_transaction(data: TransactionCreate, db: Session = Depends(get_db),
         source_type=data.source_type or "manual",
     )
     db.add(txn)
+    # 并发安全修复（并发实测发现）：balance 读-改-写非原子 → 并发扣款丢更新。
+    # 改为数据库层原子 UPDATE：SET balance = balance + ? 且余额不允许为负，
+    # 通过 rowcount 判断是否冲突（0 行 = 余额不足/账户被删 → 回滚报 400）。
     sign = 1 if data.trans_type == "income" else -1
-    account.balance = round((account.balance or 0) + sign * amount, 2)
-
+    delta = sign * amount
+    from sqlalchemy import text as _sa_text
+    if data.trans_type == "expense":
+        # 支出：原子扣减且余额不为负（WHERE balance + delta >= 0）
+        res = db.execute(
+            _sa_text("UPDATE region_accounts SET balance = balance + :d WHERE id = :id AND balance + :d >= 0"),
+            {"d": delta, "id": data.account_id},
+        )
+        if res.rowcount == 0:
+            db.rollback()
+            raise HTTPException(400, f"余额不足：无法完成支出 ¥{amount:.2f}")
+    else:
+        # 收入：原子增加
+        db.execute(
+            _sa_text("UPDATE region_accounts SET balance = balance + :d WHERE id = :id"),
+            {"d": delta, "id": data.account_id},
+        )
+    # ⚠️ 不要再写 account.balance——ORM 对象是 UPDATE 前的旧值，
+    # 赋值会标记 dirty → commit 时覆盖原子 UPDATE 结果（并发丢更新复现）。
     insert_audit_log(db, username=user.username, role=user.role,
                      action="income" if data.trans_type == "income" else "expense",
                      target="transaction", target_id=data.account_id,
