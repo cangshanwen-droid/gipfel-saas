@@ -30,6 +30,7 @@
 |------|------|:--:|------|------|
 | SEC-P0 | **资金桥越权**：`/api/stock/fund` 用请求体 username 而非 JWT 身份，任意登录用户可操作他人区域账户资金 | P0 | JWT 身份绑定（非 admin 只能操作自己） | ✅ 实测 403 拦截 |
 | BIZ-H1 | **审批/编辑无角色校验**：rep 绕过前端可直接调 API 审批/创建/编辑合同 | 高 | create/update/approve 限 admin/operator | ✅ 实测 403 + rep 只读正常 |
+| BIZ-H2 | **数据隔离缺失**：rep 可拉取全部合同（云端无 org 过滤）+ **公司 org_id 从未写回**（公司与组织关联断裂——隔离与资金映射的地基） | 高 | 列表/详情按 org 强制过滤 + 建公司补 org_id + 存量迁移 | ✅ 实测 rep 只见本公司、跨公司 403 |
 | ENG-P0 | PEP 604 语法（`int\|None`）| P0 | **确认误报**——仅未部署的 main.py 有，线上 stock_mini.py 与 gipfel-saas 零残留 | ✅ grep 实证 |
 | ENG-P2 | async 函数内同步 urllib 调用 | P2 | 影响小（单用户场景），记录不修 | 📝 已记录 |
 | ENG-P2 | stock-api 无自动化测试 | P2 | **已补**：`tests/test_smoke.py` 4 项冒烟 | ✅ 4/4 通过 |
