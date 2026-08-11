@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
 from ..database import get_db, commit_with_retry
-from ..models import User, Organization
+from ..models import User, Organization, Company, UserCompany
 from ..auth import hash_password, verify_password, create_access_token, check_login_limit, record_login_attempt, get_current_user, get_admin_user
 from ..services.audit import insert_audit_log
 
@@ -79,8 +79,10 @@ class CreateUserReq(BaseModel):
     password: str
     role: str = "user"
     org_id: Optional[int] = None
-    # v1.3.0 多公司绑定：主席（operator）可管多家公司（org_ids 列表）
+    # v1.3.0 多公司绑定：主席（operator）可管多家公司（org_ids 列表 = 组织 id）
     org_ids: Optional[List[int]] = None
+    # 兼容：company_ids 列表（公司 id，内部映射到 org_id；桌面端多选传公司 id）
+    company_ids: Optional[List[int]] = None
 
 
 class ResetPasswordReq(BaseModel):
@@ -101,8 +103,14 @@ def create_user(data: CreateUserReq, db: Session = Depends(get_db),
         org = db.query(Organization).filter(Organization.id == data.org_id).first()
         if not org:
             raise HTTPException(400, "所属公司不存在")
-    # v1.3.0 多公司绑定：org_ids 校验（每项须为有效组织 id）
-    org_ids = data.org_ids or ([data.org_id] if data.org_id is not None else None)
+    # v1.3.0 多公司绑定：org_ids（组织 id）或 company_ids（公司 id，需映射）
+    if data.company_ids:
+        comp_rows = db.query(Company.id, Company.org_id).filter(Company.id.in_(data.company_ids)).all()
+        if len(comp_rows) != len(set(data.company_ids)):
+            raise HTTPException(400, "存在无效的公司绑定")
+        org_ids = [r[1] for r in comp_rows if r[1] is not None]
+    else:
+        org_ids = data.org_ids or ([data.org_id] if data.org_id is not None else None)
     if org_ids:
         valid = {r[0] for r in db.query(Organization.id).filter(Organization.id.in_(org_ids)).all()}
         invalid = [o for o in org_ids if o not in valid]
@@ -115,7 +123,6 @@ def create_user(data: CreateUserReq, db: Session = Depends(get_db),
     commit_with_retry(db)
     # 多公司绑定：写入 user_companies（org_ids 是组织 id，需映射到 company_id）
     if org_ids:
-        from ..models import Company, UserCompany
         for oid in org_ids:
             comp = db.query(Company.id).filter(Company.org_id == oid).first()
             if comp:

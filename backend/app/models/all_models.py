@@ -219,17 +219,14 @@ class User(Base):
             if self.org_id:
                 return [self.org_id]
             return []
-        # 多对多：查 companies.org_id（公司→组织映射）
+        # 多对多：ORM 查询 companies.org_id（公司→组织映射；IN 用 ORM 原生绑定）
         try:
-            from sqlalchemy import text
             session = object_session(self)
             if session is None:
-                return ids  # 无法查询时退回 company_id（桌面端本地 org_id 语义）
-            rows = session.execute(
-                text("SELECT org_id FROM companies WHERE id IN :ids AND org_id IS NOT NULL"),
-                {"ids": tuple(ids)}).fetchall() if len(ids) > 1 else session.execute(
-                text("SELECT org_id FROM companies WHERE id = :id AND org_id IS NOT NULL"),
-                {"id": ids[0]}).fetchall()
+                return ids  # 无法查询时退回 company_id
+            from .all_models import Company
+            rows = session.query(Company.org_id).filter(
+                Company.id.in_(ids), Company.org_id.isnot(None)).all()
             orgs = [r[0] for r in rows]
             return orgs if orgs else ids
         except Exception:
