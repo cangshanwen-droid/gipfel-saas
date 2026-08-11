@@ -79,6 +79,8 @@ class Contract(Base):
     updated_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # ── v1.3.0 乐观锁：并发编辑防后写覆盖先写（前端传 expected_version 时校验，自增）──
+    version = Column(Integer, default=1, nullable=False)
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, default=None)
 
     items = relationship("ContractItem", back_populates="contract", cascade="all, delete-orphan")

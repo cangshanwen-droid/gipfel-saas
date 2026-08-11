@@ -68,6 +68,8 @@ class ContractUpdate(BaseModel):
     progress: Optional[float] = None
     expected_income: Optional[float] = None
     items: Optional[List[ItemData]] = None
+    # ── v1.3.0 乐观锁：可选。前端传 expected_version 时，若与当前版本不符 → 409（并发编辑冲突）──
+    expected_version: Optional[int] = None
 
 
 class ApproveReq(BaseModel):
@@ -550,6 +552,13 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
     if not c:
         raise HTTPException(404, "合同不存在")
 
+    # ── v1.3.0 乐观锁：客户端传 expected_version 时校验版本（防并发编辑后写覆盖先写）──
+    if data.expected_version is not None:
+        if (c.version or 1) != data.expected_version:
+            raise HTTPException(
+                409,
+                f"合同已被他人修改（当前版本 {c.version or 1}，您编辑的版本 {data.expected_version}），请刷新后重试")
+
     # 状态机强制（先校验、后写库）
     if data.status is not None and data.status != c.status:
         err = _validate_status_transition(c.status, data.status, c.approval_status)
@@ -611,6 +620,9 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
                      new_value=json.dumps({"contract_name": c.contract_name, "status": c.status,
                                            **{k: getattr(data, k, None) for k in changed if k != "items"}},
                                           ensure_ascii=False, default=str))
+
+    # ── v1.3.0 乐观锁：版本自增（每次成功编辑 +1，客户端下次编辑需带新版本）──
+    c.version = (c.version or 1) + 1
 
     commit_with_retry(db)
     db.refresh(c)
