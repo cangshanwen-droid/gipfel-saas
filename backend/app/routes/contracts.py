@@ -462,58 +462,76 @@ def get_contract(contract_id: int, db: Session = Depends(get_db), _=Depends(get_
 
 @router.post("")
 def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    year = datetime.utcnow().year
-    prefix = "CT"
-    max_seq = db.query(Contract).filter(Contract.contract_no.like(f"{prefix}-{year}-%")).count()
-    contract_no = f"{prefix}-{year}-{max_seq + 1:04d}"
+    # 并发安全修复（三端口并发实测发现）：contract_no 生成曾用 count()+1（非原子），
+    # 并发创建会生成相同编号 → unique 冲突 500。改为：顺序号 + 随机后缀保证唯一
+    # （顺序号可读，随机后缀抗并发），冲突重试兜底。
+    import random
+    from sqlalchemy.exc import IntegrityError
+    from ..database import commit_with_retry as _cwr
+    for attempt in range(6):
+        try:
+            year = datetime.utcnow().year
+            prefix = "CT"
+            max_seq = db.query(Contract).filter(Contract.contract_no.like(f"{prefix}-{year}-%")).count()
+            seq = max_seq + 1
+            if attempt == 0:
+                contract_no = f"{prefix}-{year}-{seq:04d}"
+            else:
+                # 冲突重试：追加随机后缀彻底避免同号（count 在并发下不随重试变化）
+                contract_no = f"{prefix}-{year}-{seq:04d}-{random.randint(1000, 9999)}"
 
-    # 与桌面端一致：新建合同固定 draft/none（审批通过后才能进入执行），金额由明细计算
-    total_cost, expected_income = _compute_amounts(data.contract_type_id, data.items)
-    contract = Contract(
-        contract_no=contract_no,
-        contract_name=data.contract_name,
-        contract_type_id=data.contract_type_id,
-        party_a=data.party_a,
-        party_b_name=data.party_b_name,
-        party_b_id=data.party_b_id,
-        region_id=data.region_id,
-        sign_date=data.sign_date,
-        status="draft",
-        approval_status="none",
-        notes=data.notes,
-        total_cost=total_cost,
-        expected_income=expected_income,
-        created_by=user.username,
-        updated_by=user.username,
-    )
-    db.add(contract)
-    db.flush()
+            # 与桌面端一致：新建合同固定 draft/none（审批通过后才能进入执行），金额由明细计算
+            total_cost, expected_income = _compute_amounts(data.contract_type_id, data.items)
+            contract = Contract(
+                contract_no=contract_no,
+                contract_name=data.contract_name,
+                contract_type_id=data.contract_type_id,
+                party_a=data.party_a,
+                party_b_name=data.party_b_name,
+                party_b_id=data.party_b_id,
+                region_id=data.region_id,
+                sign_date=data.sign_date,
+                status="draft",
+                approval_status="none",
+                notes=data.notes,
+                total_cost=total_cost,
+                expected_income=expected_income,
+                created_by=user.username,
+                updated_by=user.username,
+            )
+            db.add(contract)
+            db.flush()
 
-    for idx, item in enumerate(data.items):
-        db.add(ContractItem(
-            contract_id=contract.id,
-            item_name=item.item_name,
-            quantity=item.quantity,
-            unit_price=item.unit_price,
-            land_area=item.land_area,
-            tax_rate=item.tax_rate,
-            skill_level=item.skill_level,
-            carbon_factor=item.carbon_factor,
-            total_cost=item.total_cost,
-            expected_income=item.expected_income,
-            sort_order=idx,
-        ))
+            for idx, item in enumerate(data.items):
+                db.add(ContractItem(
+                    contract_id=contract.id,
+                    item_name=item.item_name,
+                    quantity=item.quantity,
+                    unit_price=item.unit_price,
+                    land_area=item.land_area,
+                    tax_rate=item.tax_rate,
+                    skill_level=item.skill_level,
+                    carbon_factor=item.carbon_factor,
+                    total_cost=item.total_cost,
+                    expected_income=item.expected_income,
+                    sort_order=idx,
+                ))
 
-    # 版本留痕 v1 + 审计
-    _save_version_snapshot(db, contract.id, _contract_row(db, contract), ["创建合同"], user.username)
-    insert_audit_log(db, username=user.username, role=user.role, action="create", target="contract",
-                     target_id=contract.id,
-                     new_value=json.dumps({"contract_no": contract_no, "contract_name": data.contract_name}, ensure_ascii=False))
+            # 版本留痕 v1 + 审计
+            _save_version_snapshot(db, contract.id, _contract_row(db, contract), ["创建合同"], user.username)
+            insert_audit_log(db, username=user.username, role=user.role, action="create", target="contract",
+                             target_id=contract.id,
+                             new_value=json.dumps({"contract_no": contract_no, "contract_name": data.contract_name}, ensure_ascii=False))
 
-    # P1-3：WAL + busy_timeout 兜底，极端并发提交冲突时退避重试（2 次）
-    commit_with_retry(db)
-    db.refresh(contract)
-    return _contract_row(db, contract)
+            # P1-3：WAL + busy_timeout 兜底，极端并发提交冲突时退避重试（2 次）
+            _cwr(db)
+            db.refresh(contract)
+            return _contract_row(db, contract)
+        except IntegrityError:
+            # contract_no unique 冲突（并发竞态）：回滚重试换号
+            db.rollback()
+            continue
+    raise HTTPException(409, "创建合同失败：编号冲突，请重试")
 
 
 @router.put("/{contract_id}")
