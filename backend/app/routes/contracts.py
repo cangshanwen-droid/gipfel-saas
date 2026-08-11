@@ -475,6 +475,9 @@ def get_contract(contract_id: int, db: Session = Depends(get_db), _=Depends(get_
 
 @router.post("")
 def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """创建合同（H1 修复：限 admin/operator——rep 只读，前端已隐藏入口，此处纵深防御）"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权创建合同（仅管理员/运营可创建）")
     # 并发安全修复（三端口并发实测发现）：contract_no 生成曾用 count()+1（非原子），
     # 并发创建会生成相同编号 → unique 冲突 500。改为：顺序号 + 随机后缀保证唯一
     # （顺序号可读，随机后缀抗并发），冲突重试兜底。
@@ -552,6 +555,7 @@ def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: U
 def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
     """更新合同（PUT/PATCH 均可，字段部分更新）。
+    H1 修复（2026-08-11 业务审核）：限 admin/operator——rep 只读，前端已隐藏入口，此处纵深防御。
 
     P0-1：补齐 ROUTE_MAP contract:update 指向的 PUT /api/contracts/{id}。
     与桌面端 CONTRACT_UPDATE 对齐：
@@ -559,6 +563,8 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
       - 「状态更新 + 资金入账」同一事务（余额不足整体回滚，状态不落库）
       - 编辑留痕（contract_versions 旧快照）+ 审计日志
     """
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权编辑合同（仅管理员/运营可编辑）")
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c:
         raise HTTPException(404, "合同不存在")
@@ -643,7 +649,10 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
 @router.post("/{contract_id}/approve")
 def approve_contract(contract_id: int, data: ApproveReq, db: Session = Depends(get_db),
                      user: User = Depends(get_current_user)):
-    """合同审批状态机：submit / approve / reject（对齐桌面端 transitionApproval）。"""
+    """合同审批状态机：submit / approve / reject（对齐桌面端 transitionApproval）。
+    H1 修复（2026-08-11 业务审核）：审批操作限 admin/operator（rep 只读——前端已隐藏按钮，此处纵深防御）"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权审批合同（仅管理员/运营可审批）")
     if data.action not in ("submit", "approve", "reject"):
         raise HTTPException(400, f"未知的审批操作：{data.action}（仅支持 submit / approve / reject）")
     c = db.query(Contract).filter(Contract.id == contract_id).first()
