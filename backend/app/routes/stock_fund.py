@@ -26,6 +26,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import text as sa_text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import get_current_user_optional
@@ -107,7 +108,9 @@ def stock_fund_transaction(req_body: dict,
     if not idem_key:
         raise HTTPException(400, "idempotency_key 必填（幂等防重复）")
 
-    # ── 幂等：已处理过的 key 直接返回首次结果 ──
+    # ── 幂等（DB 级）：流水 INSERT 带 idempotency_key（部分唯一索引）──
+    # 并发同 key：两个事务同时尝试 INSERT → 一个成功一个 IntegrityError →
+    # 失败者回滚后查已有流水返回原结果（不重复扣款）。内存字典仅作快速路径。
     if idem_key in _STOCK_FUND_KEYS:
         return _STOCK_FUND_KEYS[idem_key]
 
@@ -128,7 +131,7 @@ def stock_fund_transaction(req_body: dict,
             sa_text("UPDATE region_accounts SET balance = balance + :a WHERE id = :id"),
             {"a": amount, "id": acct.id})
 
-    # ── 流水留痕（idempotency_key 存 description 尾部，补偿/对账可追溯）──
+    # ── 流水留痕（idempotency_key 唯一——DB 级幂等防重复）──
     db.add(AccountTransaction(
         account_id=acct.id,
         trans_type=trans_type,
@@ -138,8 +141,20 @@ def stock_fund_transaction(req_body: dict,
         fiscal_year=datetime.utcnow().year,
         operator=username,
         source_type="stock",
+        idempotency_key=idem_key,
     ))
-    commit_with_retry(db)
+    try:
+        commit_with_retry(db)
+    except IntegrityError:
+        # 并发同 key：唯一索引冲突 → 本事务回滚（余额未动），返回首次处理结果
+        db.rollback()
+        existing = db.query(AccountTransaction).filter(
+            AccountTransaction.idempotency_key == idem_key).first()
+        if existing:
+            return {"success": True, "balance": round(float(acct.balance or 0), 2),
+                    "account_id": acct.id, "idempotency_key": idem_key,
+                    "deduplicated": True}
+        raise HTTPException(500, "资金处理冲突，请重试")
     db.refresh(acct)
 
     result = {"success": True, "balance": round(float(acct.balance or 0), 2),

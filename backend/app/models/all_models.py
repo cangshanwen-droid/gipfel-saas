@@ -1,7 +1,7 @@
 """所有数据库模型 — 对应 Electron 版的 12 张表 + 新增 SaaS 字段"""
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Float, ForeignKey, DateTime, Text, Index, Boolean
+    Column, Integer, String, Float, ForeignKey, DateTime, Text, Index, Boolean, text
 )
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -221,9 +221,15 @@ class AccountTransaction(Base):
     operator = Column(String, default="")
     contract_id = Column(Integer, nullable=True)
     source_type = Column(String, default="manual")  # manual / contract
+    # v1.3.0 跨库资金桥幂等：订单号唯一（并发同 key 只扣一次——DB 级唯一约束，
+    # 内存字典有竞态，曾致并发同 key 双扣）
+    idempotency_key = Column(String, default="", nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
+        # 部分唯一索引：仅对带 key 的流水生效（manual 类流水 key 为空不约束）
+        Index("uq_account_txn_idem_key", "idempotency_key", unique=True,
+              sqlite_where=text("idempotency_key != ''")),
         Index("idx_trans_account", "account_id"),
         Index("idx_trans_fiscal", "fiscal_year"),
     )
