@@ -11,8 +11,10 @@ from .database import get_db
 from .models import User
 
 security = HTTPBearer()
+# 可选鉴权：无 Authorization 头不报 401（返回 None），供内部服务回环调用
+security_optional = HTTPBearer(auto_error=False)
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 # ── 登录限流 ─────────────────────────────────────
 _login_attempts: Dict[str, Tuple[int, float]] = {}  # username -> (count, reset_time)
@@ -68,6 +70,21 @@ def get_current_user(
     if not user:
         raise HTTPException(status_code=401, detail="用户不存在")
     return user
+
+
+def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_optional),
+    db: Session = Depends(get_db),
+):
+    """可选鉴权：无 token 返回 None（调用方自行处理），有 token 则校验。"""
+    if credentials is None:
+        return None
+    try:
+        payload = jwt.decode(credentials.credentials, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id = int(payload.get("sub"))
+    except (JWTError, ValueError):
+        return None
+    return db.query(User).filter(User.id == user_id).first()
 
 def get_admin_user(user: User = Depends(get_current_user)) -> User:
     if user.role != "admin":

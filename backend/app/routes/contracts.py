@@ -258,7 +258,8 @@ def _has_contract_transaction(db: Session, contract_id: int, trans_type: str, ca
 
 
 def _register_contract_expense(db: Session, contract: Contract, operator: str):
-    """合同支出入账：余额不足抛 400（同一事务内，调用方回滚）。"""
+    """合同支出入账：余额不足抛 400（同一事务内，调用方回滚）。
+    v1.3.0 修复：balance 改原子 UPDATE（ORM 读改写并发丢更新——曾与资金流水同 bug）。"""
     if not contract.region_id:
         return
     acct = _get_or_create_master_account(db, contract.region_id)
@@ -279,7 +280,13 @@ def _register_contract_expense(db: Session, contract: Contract, operator: str):
         contract_id=contract.id,
         source_type="contract",
     ))
-    acct.balance = round(balance - amount, 2)
+    # 原子扣减 + 防透支守卫（与 accounts.py add_transaction 同机制）
+    from sqlalchemy import text as _sa_text
+    res = db.execute(
+        _sa_text("UPDATE region_accounts SET balance = balance - :a WHERE id = :id AND balance >= :a"),
+        {"a": amount, "id": acct.id})
+    if res.rowcount == 0:
+        raise HTTPException(400, f"余额不足：无法完成合同支出 ¥{amount:.2f}")
 
 
 def _register_contract_income(db: Session, contract: Contract, operator: str):
@@ -300,7 +307,11 @@ def _register_contract_income(db: Session, contract: Contract, operator: str):
         contract_id=contract.id,
         source_type="contract",
     ))
-    acct.balance = round((acct.balance or 0) + amount, 2)
+    # v1.3.0 修复：原子增加（ORM 赋值会 dirty 覆盖原子结果）
+    from sqlalchemy import text as _sa_text
+    db.execute(
+        _sa_text("UPDATE region_accounts SET balance = balance + :a WHERE id = :id"),
+        {"a": amount, "id": acct.id})
 
 
 def _notify_approval(db: Session, contract: Contract, action: str):

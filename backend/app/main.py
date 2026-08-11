@@ -50,6 +50,8 @@ app.include_router(announcements.router, prefix="/api/announcements", tags=["公
 app.include_router(audit.router, prefix="/api/audit", tags=["审计"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["通知"])
 app.include_router(backup.router, prefix="/api/backup", tags=["备份"])
+from .routes.stock_fund import router as stock_fund_router
+app.include_router(stock_fund_router, tags=["股票资金桥"])
 
 
 @app.get("/api/health")

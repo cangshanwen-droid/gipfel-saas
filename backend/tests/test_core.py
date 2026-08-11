@@ -212,3 +212,50 @@ class TestTaxRatio:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ═══ 7. 合同审批入账原子性（回归：曾 ORM 读改写丢更新）═══
+class TestContractAccountAtomic:
+    def test_concurrent_contract_approvals_balance_exact(self):
+        """两个合同同时审批执行 → 区域账户余额精确扣减（无丢更新）"""
+        from concurrent.futures import ThreadPoolExecutor
+        h = login()
+        # 建 2 个合同（小金额）
+        ids = []
+        for i in range(2):
+            r = client.post("/api/contracts", headers=h, json={
+                "contract_name": f"原子并发{i}", "contract_type_id": 1, "region_id": 1,
+                "party_a": "甲", "party_b_name": "建设集团一公司",
+                "items": [{"item_name": "工程", "quantity": 1, "unit_price": 1000, "tax_rate": 0}],
+                "created_by": "admin"})
+            assert r.status_code in (200, 201), r.text[:80]
+            ids.append(r.json()["id"])
+
+        # 余额快照
+        r = client.get("/api/accounts", headers=h)
+        aid = next(a["id"] for a in r.json() if a["region_id"] == 1)
+        bal0 = float(next(a["balance"] for a in r.json() if a["id"] == aid))
+
+        # 并发提交审批 → 执行（支出）
+        def submit_approve_activate(cid):
+            client.post(f"/api/contracts/{cid}/approve", headers=h, json={"action": "submit"})
+            client.post(f"/api/contracts/{cid}/approve", headers=h, json={"action": "approve"})
+            # 审批通过后置 active → 触发合同支出入账
+            client.put(f"/api/contracts/{cid}", headers=h, json={"status": "active"})
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            list(ex.map(submit_approve_activate, ids))
+
+        r = client.get("/api/accounts", headers=h)
+        bal1 = float(next(a["balance"] for a in r.json() if a["id"] == aid))
+        # 每合同 total_cost = 1*1000*1.0 = 1000，两笔支出 2000
+        expect = round(bal0 - 2000, 2)
+        assert abs(bal1 - expect) < 0.01, f"合同入账丢更新: {bal0}→{bal1} 期望 {expect}"
+
+        # 清理
+        for cid in ids:
+            client.delete(f"/api/contracts/{cid}", headers=h)
+        # 冲回余额
+        client.post("/api/accounts/transactions", headers=h, json={
+            "account_id": aid, "trans_type": "income", "category": "测试恢复",
+            "amount": round(bal0 - bal1, 2), "description": "pytest-contract-restore"})
