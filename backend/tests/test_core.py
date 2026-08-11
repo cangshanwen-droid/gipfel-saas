@@ -12,6 +12,7 @@ Gipfel 云端后端核心测试（pytest + TestClient）
 import os
 import sys
 import tempfile
+from uuid import uuid4
 
 # 使用临时 DB（不碰生产 gipfel.db）——必须在 import app 前设置
 _tmp = tempfile.mkdtemp(prefix="gipfel-test-")
@@ -259,3 +260,34 @@ class TestContractAccountAtomic:
         client.post("/api/accounts/transactions", headers=h, json={
             "account_id": aid, "trans_type": "income", "category": "测试恢复",
             "amount": round(bal0 - bal1, 2), "description": "pytest-contract-restore"})
+
+
+# ═══ 8. 资金桥并发幂等（回归：曾内存字典竞态致并发同 key 双扣）═══
+class TestStockFundIdempotency:
+    def test_concurrent_same_key_deduct_once(self):
+        """并发 5 个同 key 扣款请求 → 只扣一次（DB 级唯一索引）"""
+        from concurrent.futures import ThreadPoolExecutor
+        h = login()
+        # 查询区域账户余额
+        r = client.get("/api/accounts", headers=h)
+        aid = next(a["id"] for a in r.json() if a["region_id"] == 1)
+        bal0 = float(next(a["balance"] for a in r.json() if a["id"] == aid))
+
+        key = f"pytest-idem-{uuid4().hex[:8]}"
+        def call(_):
+            return client.post("/api/stock/fund", headers=h, json={
+                "username": "admin", "side": "buy", "amount": 50,
+                "idempotency_key": key})
+
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            resps = list(ex.map(call, range(5)))
+        assert all(r.status_code == 200 for r in resps), [r.status_code for r in resps]
+
+        r = client.get("/api/accounts", headers=h)
+        bal1 = float(next(a["balance"] for a in r.json() if a["id"] == aid))
+        assert abs(bal1 - (bal0 - 50)) < 0.01, f"并发同 key 双扣: {bal0}→{bal1} 期望 {bal0-50}"
+
+        # 恢复
+        client.post("/api/stock/fund", headers=h, json={
+            "username": "admin", "side": "sell", "amount": 50,
+            "idempotency_key": f"{key}-restore"})
