@@ -119,15 +119,20 @@ def _validate_status_transition(old_status, new_status, approval_status) -> Opti
 
 # ── 金额计算（P0-3：税率按百分比；对齐桌面端 computeContractAmounts）──
 def _compute_amounts(contract_type_id, items: List[ItemData]):
+    """H2/H3 修复（2026-08-11 业务审核）：与桌面端 contract.repo.ts 口径统一——
+    显式金额必须 >0 才采用（0 视为未录入走推算），防 DB 存 0 绕过推算击穿余额预检；
+    推算 = 数量×单价×(1+税率/100)。"""
     total_cost = 0.0
     expected_income = 0.0
     for it in items or []:
         qty = it.quantity if it.quantity is not None else 1
         price = it.unit_price if it.unit_price is not None else 0
         tax = it.tax_rate if it.tax_rate is not None else 0
-        # 显式录入金额优先（0 也是显式值）；未录入(None)才按 数量×单价×(1+税率/100) 推算
-        item_cost = it.total_cost if it.total_cost is not None else qty * price * (1 + tax / 100)
-        item_income = it.expected_income if it.expected_income is not None else (qty * price if contract_type_id == 7 else 0)
+        # 显式录入金额且 >0 优先；0 或 None 一律按 数量×单价×(1+税率/100) 推算
+        item_cost = it.total_cost if (it.total_cost is not None and it.total_cost > 0) \
+            else qty * price * (1 + tax / 100)
+        item_income = it.expected_income if (it.expected_income is not None and it.expected_income > 0) \
+            else (qty * price if contract_type_id == 7 else 0)
         total_cost += item_cost
         expected_income += item_income
     return round(total_cost, 2), round(expected_income, 2)
@@ -215,8 +220,10 @@ def _changed_fields(old: dict, data: ContractUpdate) -> List[str]:
         if k in ("updated_by", "created_by"):
             continue
         if k == "items":
+            def _dumps_item(i):
+                return i.model_dump() if hasattr(i, "model_dump") else i
             if json.dumps(old.get("items") or [], ensure_ascii=False, default=str) != json.dumps(
-                [i.model_dump() for i in (v or [])], ensure_ascii=False, default=str
+                [_dumps_item(i) for i in (v or [])], ensure_ascii=False, default=str
             ):
                 changed.append("items")
             continue
@@ -617,8 +624,24 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
 
     # 明细整体替换 + 重算合同级金额（未显式录入的明细金额按 数量×单价×(1+税率/100) 推算）
     if data.items is not None:
+        # H2 修复（2026-08-11 业务审核）：前端编辑只传 7 个字段（不含 total_cost/expected_income），
+        # 投资(5)/拨款(6) 等类型若按 1×0×税率 推算会归零 → 资金永不入账。
+        # 从旧明细继承显式金额（对齐桌面端 contract.repo.ts:282-290）：
+        # 新明细的 total_cost/expected_income 为空时，取同 item_name 旧明细的值。
+        old_items = {
+            (i.item_name or ""): i for i in db.query(ContractItem)
+            .filter(ContractItem.contract_id == contract_id).all()
+        }
         db.query(ContractItem).filter(ContractItem.contract_id == contract_id).delete(synchronize_session=False)
+        merged_items = []
         for idx, item in enumerate(data.items):
+            old = old_items.get(item.item_name or "")
+            tc = item.total_cost
+            ei = item.expected_income
+            if (tc is None or tc <= 0) and old is not None and old.total_cost and old.total_cost > 0:
+                tc = old.total_cost  # 继承旧明细显式金额（防推算归零）
+            if (ei is None or ei <= 0) and old is not None and old.expected_income and old.expected_income > 0:
+                ei = old.expected_income
             db.add(ContractItem(
                 contract_id=contract_id,
                 item_name=item.item_name,
@@ -628,11 +651,19 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
                 tax_rate=item.tax_rate,
                 skill_level=item.skill_level,
                 carbon_factor=item.carbon_factor,
-                total_cost=item.total_cost,
-                expected_income=item.expected_income,
+                total_cost=tc,
+                expected_income=ei,
                 sort_order=idx,
             ))
-        tc, ei = _compute_amounts(c.contract_type_id or data.contract_type_id, data.items)
+            # 重算用继承后的明细（含 tc/ei）——避免用原始 items 重算又归零
+            merged_items.append(ItemData(
+                item_name=item.item_name or "", quantity=item.quantity,
+                unit_price=item.unit_price, land_area=item.land_area,
+                tax_rate=item.tax_rate, skill_level=item.skill_level,
+                carbon_factor=item.carbon_factor,
+                total_cost=tc, expected_income=ei,
+            ))
+        tc, ei = _compute_amounts(c.contract_type_id or data.contract_type_id, merged_items)
         c.total_cost = tc
         c.expected_income = ei
     db.flush()

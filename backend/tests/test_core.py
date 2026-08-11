@@ -291,3 +291,30 @@ class TestStockFundIdempotency:
         client.post("/api/stock/fund", headers=h, json={
             "username": "admin", "side": "sell", "amount": 50,
             "idempotency_key": f"{key}-restore"})
+
+
+# ═══ 9. 编辑投资/拨款合同金额保留（回归：曾编辑后显式金额推算归零→资金不入账）═══
+class TestContractEditAmountPreserve:
+    def test_edit_invest_contract_keeps_amount(self):
+        """投资(5)合同：创建带显式投资总额 → 编辑（前端只传7字段）→ 金额保留不归零"""
+        h = login()
+        # 创建投资合同（total_cost 显式 800000）
+        r = client.post("/api/contracts", headers=h, json={
+            "contract_name": "投资编辑保留", "contract_type_id": 5, "region_id": 1,
+            "party_a": "甲", "party_b_name": "建设集团一公司",
+            "items": [{"item_name": "光伏项目", "quantity": 1, "unit_price": 0,
+                       "total_cost": 800000, "tax_rate": 0}],
+            "created_by": "admin"})
+        assert r.status_code in (200, 201), r.text[:100]
+        cid = r.json()["id"]
+        assert abs(r.json()["total_cost"] - 800000) < 0.01, f"创建金额错误: {r.json().get('total_cost')}"
+
+        # 编辑：前端只传 7 个字段（无 total_cost）→ 应继承旧金额
+        r = client.put(f"/api/contracts/{cid}", headers=h, json={
+            "contract_name": "投资编辑保留-改",
+            "items": [{"item_name": "光伏项目", "quantity": 1, "unit_price": 0}]})
+        assert r.status_code == 200, r.text[:100]
+        assert abs(r.json()["total_cost"] - 800000) < 0.01,             f"编辑后金额归零(跨端分叉): {r.json().get('total_cost')}"
+
+        # 清理
+        client.delete(f"/api/contracts/{cid}", headers=h)
