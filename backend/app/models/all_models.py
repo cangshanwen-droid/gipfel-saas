@@ -3,7 +3,7 @@ from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Float, ForeignKey, DateTime, Text, Index, Boolean, text
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, object_session
 from ..database import Base
 
 # ── 1. regions ───────────────────────────────────
@@ -196,6 +196,45 @@ class User(Base):
     last_login = Column(String, nullable=True)  # 最近登录时间（系统概览活跃用户统计）
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # v1.3.0 多公司绑定：用户 ↔ 公司 多对多（主席可管多家公司）
+    company_links = relationship(
+        "UserCompany", backref="user", cascade="all, delete-orphan",
+        primaryjoin="User.id == UserCompany.user_id")
+
+    @property
+    def company_ids(self) -> list:
+        """该用户绑定的全部公司 id（多对多；兼容 org_id 单值逻辑）"""
+        ids = [c.company_id for c in (self.company_links or [])]
+        if not ids and self.org_id:
+            ids = [self.org_id]
+        return ids
+
+    @property
+    def company_org_ids(self) -> list:
+        """该用户绑定公司的 org_id 列表（多对多；用于合同隔离 IN 查询）。
+        UserCompany.company_id 是 companies.id；org_id 是 organizations.id。
+        旧数据 org_id 单值：该值本身即组织 id。"""
+        ids = [c.company_id for c in (self.company_links or [])]
+        if not ids:
+            if self.org_id:
+                return [self.org_id]
+            return []
+        # 多对多：查 companies.org_id（公司→组织映射）
+        try:
+            from sqlalchemy import text
+            session = object_session(self)
+            if session is None:
+                return ids  # 无法查询时退回 company_id（桌面端本地 org_id 语义）
+            rows = session.execute(
+                text("SELECT org_id FROM companies WHERE id IN :ids AND org_id IS NOT NULL"),
+                {"ids": tuple(ids)}).fetchall() if len(ids) > 1 else session.execute(
+                text("SELECT org_id FROM companies WHERE id = :id AND org_id IS NOT NULL"),
+                {"id": ids[0]}).fetchall()
+            orgs = [r[0] for r in rows]
+            return orgs if orgs else ids
+        except Exception:
+            return ids
+
 # ── 10. region_accounts ──────────────────────────
 class RegionAccount(Base):
     __tablename__ = "region_accounts"
@@ -318,3 +357,16 @@ class AuditLog(Base):
         Index("idx_audit_username", "username"),
         Index("idx_audit_action", "action"),
     )
+
+
+# ── v1.3.0 多公司绑定：用户 ↔ 公司 多对多关联表 ──
+# 主席（operator）可管多家公司：user_companies 记录 user 与 company 的关联。
+# 代表（rep）仍单公司（取第一行，兼容 org_id 单值逻辑）。
+class UserCompany(Base):
+    __tablename__ = "user_companies"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("uq_user_company", "user_id", "company_id", unique=True),)

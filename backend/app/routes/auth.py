@@ -45,7 +45,7 @@ def login(req: LoginReq, db: Session = Depends(get_db)):
     db.commit()
     token = create_access_token(user.id, user.username, user.role)
     # 公司绑定对齐：返回 org_id（用户归属组织，与桌面端 company_id 对应）
-    return {"token": token, "user": {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id}}
+    return {"token": token, "user": {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id, "company_ids": user.company_ids}}
 
 
 @router.post("/logout")
@@ -79,6 +79,8 @@ class CreateUserReq(BaseModel):
     password: str
     role: str = "user"
     org_id: Optional[int] = None
+    # v1.3.0 多公司绑定：主席（operator）可管多家公司（org_ids 列表）
+    org_ids: Optional[List[int]] = None
 
 
 class ResetPasswordReq(BaseModel):
@@ -99,12 +101,28 @@ def create_user(data: CreateUserReq, db: Session = Depends(get_db),
         org = db.query(Organization).filter(Organization.id == data.org_id).first()
         if not org:
             raise HTTPException(400, "所属公司不存在")
+    # v1.3.0 多公司绑定：org_ids 校验（每项须为有效组织 id）
+    org_ids = data.org_ids or ([data.org_id] if data.org_id is not None else None)
+    if org_ids:
+        valid = {r[0] for r in db.query(Organization.id).filter(Organization.id.in_(org_ids)).all()}
+        invalid = [o for o in org_ids if o not in valid]
+        if invalid:
+            raise HTTPException(400, f"所属公司不存在: {invalid}")
     user = User(username=data.username, password=hash_password(data.password),
                 role=data.role if data.role in ("admin", "operator", "user", "rep") else "user",
                 org_id=data.org_id)
     db.add(user)
     commit_with_retry(db)
-    return {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id}
+    # 多公司绑定：写入 user_companies（org_ids 是组织 id，需映射到 company_id）
+    if org_ids:
+        from ..models import Company, UserCompany
+        for oid in org_ids:
+            comp = db.query(Company.id).filter(Company.org_id == oid).first()
+            if comp:
+                db.add(UserCompany(user_id=user.id, company_id=comp[0]))
+        commit_with_retry(db)
+    return {"id": user.id, "username": user.username, "role": user.role,
+            "org_id": user.org_id, "org_ids": org_ids or []}
 
 
 @router.post("/users/{user_id}/reset-password")

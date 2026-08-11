@@ -3,4 +3,5 @@ from .all_models import (
     InfrastructureType, FormulaLog, InfraEmploymentBonus,
     User, RegionAccount, AccountTransaction, SchemaMigration,
     Organization, ContractVersion, Announcement, Notification, AuditLog,
+    UserCompany,
 )

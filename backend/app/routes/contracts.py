@@ -376,14 +376,21 @@ def list_contracts(
     # 公司过滤用 is not None 判断（company_id=0 也是显式值，不能用 truthy）
     if company_id is not None:
         q = q.filter(Contract.party_b_id == company_id)
-    # ── H2 数据隔离：非 admin/operator 强制本公司（防客户端传空 company_id 绕过）──
-    if user.role not in ("admin", "operator") and user.org_id:
-        my_company = db.query(Company.id).filter(Company.org_id == user.org_id).scalar()
-        if my_company:
-            q = q.filter(Contract.party_b_id == my_company)
+    # ── H2 数据隔离（v1.3.0 多公司）：admin 看全部；
+    # rep/operator 强制按绑定的公司 org_ids 过滤（主席可管多家公司）──
+    if user.role == "admin":
+        pass  # admin 全量
+    else:
+        org_ids = user.company_org_ids  # rep: 单 org；operator: 多 org
+        if org_ids:
+            my_companies = [r[0] for r in db.query(Company.id).filter(
+                Company.org_id.in_(org_ids)).all()]
+            if my_companies:
+                q = q.filter(Contract.party_b_id.in_(my_companies))
+            else:
+                q = q.filter(Contract.id == -1)  # 绑定失效 → 看不到任何合同
         else:
-            # 无绑定公司 → 看不到任何合同（隔离原则）
-            q = q.filter(Contract.id == -1)
+            q = q.filter(Contract.id == -1)  # 无绑定公司 → 看不到任何合同（隔离原则）
     total = q.count()
     q = q.order_by(Contract.created_at.desc())
 
@@ -489,10 +496,14 @@ def get_contract(contract_id: int, db: Session = Depends(get_db),
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c:
         raise HTTPException(404, "合同不存在")
-    # H2 数据隔离：非 admin/operator 仅可看本公司合同
-    if user.role not in ("admin", "operator") and user.org_id:
-        my_company = db.query(Company.id).filter(Company.org_id == user.org_id).scalar()
-        if not my_company or c.party_b_id != my_company:
+    # H2 数据隔离（v1.3.0 多公司）：admin 全量；rep/operator 仅可看绑定公司合同
+    if user.role != "admin":
+        org_ids = user.company_org_ids
+        if not org_ids:
+            raise HTTPException(403, "无权查看该合同")
+        my_companies = [r[0] for r in db.query(Company.id).filter(
+            Company.org_id.in_(org_ids)).all()]
+        if not my_companies or c.party_b_id not in my_companies:
             raise HTTPException(403, "无权查看其他公司的合同")
     return _contract_row(db, c)
 
