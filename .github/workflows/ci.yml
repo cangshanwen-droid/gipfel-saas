@@ -16,7 +16,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.8'
+          # 注：生产服务器是 Python 3.8，但 CI 仅验证逻辑（不部署）；
+          # uvicorn>=0.34 需 Py3.9+，CI 用 3.11 避免依赖解析失败
+          python-version: '3.11'
       - name: 安装依赖
         run: |
           pip install -r requirements.txt
