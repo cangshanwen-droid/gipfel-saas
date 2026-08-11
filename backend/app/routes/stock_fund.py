@@ -108,6 +108,12 @@ def stock_fund_transaction(req_body: dict,
     if not idem_key:
         raise HTTPException(400, "idempotency_key 必填（幂等防重复）")
 
+    # ── P0-1 修复：JWT 身份绑定（防越权——任意登录用户操作他人资金）──
+    # JWT 登录用户：非 admin 只能操作自己的 username；admin 可代操作（管理场景）
+    # 内部密钥（stock-api 回环）：可信来源，允许按 username 操作
+    if user is not None and user.username != "admin" and user.username != username:
+        raise HTTPException(403, f"无权操作其他用户的资金（身份：{user.username}）")
+
     # ── 幂等（DB 级）：流水 INSERT 带 idempotency_key（部分唯一索引）──
     # 并发同 key：两个事务同时尝试 INSERT → 一个成功一个 IntegrityError →
     # 失败者回滚后查已有流水返回原结果（不重复扣款）。内存字典仅作快速路径。
@@ -171,6 +177,9 @@ def stock_fund_query(username: str, request: Request, db: Session = Depends(get_
     expected_key = os.environ.get("ADMIN_KEY", "gipfel-admin-dev")
     if not user and internal_key != expected_key:
         raise HTTPException(401, "未认证：需要登录或内部密钥")
+    # P0-1 修复：非 admin 只能查自己
+    if user is not None and user.username != "admin" and user.username != username:
+        raise HTTPException(403, f"无权查询其他用户的资金（身份：{user.username}）")
     _, acct = _resolve_region_account(db, username)
     return {"success": True, "username": username, "balance": round(float(acct.balance or 0), 2),
             "account_id": acct.id, "account_name": acct.account_name}
