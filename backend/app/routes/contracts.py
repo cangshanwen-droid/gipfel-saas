@@ -37,8 +37,13 @@ class ItemData(BaseModel):
     tax_rate: float = 0
     skill_level: float = 0
     carbon_factor: float = 0
-    total_cost: Optional[float] = None   # None=未显式录入
+    total_cost: Optional[float] = None   # 投资金额（原总成本）
     expected_income: Optional[float] = None
+    # ── v1.3.1 金融化投资项目字段 ──
+    investment_type: str = ""            # 股权投资/债权投资/基金投资/项目投资/其他
+    equity_ratio: float = 0              # 占股比例（%）
+    expected_return_rate: float = 0      # 预期收益率（%）
+    investment_period: str = ""          # 投资期限
 
 
 class ContractCreate(BaseModel):
@@ -49,9 +54,14 @@ class ContractCreate(BaseModel):
     party_b_id: Optional[int] = None
     region_id: Optional[int] = None
     sign_date: Optional[str] = None
-    status: str = "active"  # 与桌面端一致：实际强制 draft，需审批后才能进入执行
+    status: str = "active"  # v1.3.1 金融化：创建即生效，无审批流
     notes: str = ""
     items: List[ItemData] = []
+    # ── v1.3.1 金融化新字段 ──
+    contract_amount: Optional[float] = None   # 合同金额（总投资额）
+    contract_period: str = ""                # 合同期限
+    owner: str = ""                          # 负责人
+    attachment: str = ""                     # 附件名/路径
 
 
 class ContractUpdate(BaseModel):
@@ -68,6 +78,11 @@ class ContractUpdate(BaseModel):
     progress: Optional[float] = None
     expected_income: Optional[float] = None
     items: Optional[List[ItemData]] = None
+    # ── v1.3.1 金融化新字段 ──
+    contract_amount: Optional[float] = None
+    contract_period: Optional[str] = None
+    owner: Optional[str] = None
+    attachment: Optional[str] = None
     # ── v1.3.0 乐观锁：可选。前端传 expected_version 时，若与当前版本不符 → 409（并发编辑冲突）──
     expected_version: Optional[int] = None
 
@@ -83,14 +98,14 @@ class BatchApproveReq(BaseModel):
     operator: Optional[str] = None
 
 
-# ── 常量与状态机（对齐桌面端 contract.repo）──────────
-CONTRACT_STATUSES = ["draft", "active", "completed", "terminated", "expired"]
+# ── 常量与状态机（v1.3.1 金融化：草稿/有效/执行中/完成/终止，无审批）──
+CONTRACT_STATUSES = ["draft", "active", "executing", "completed", "terminated"]
 STATUS_TRANSITIONS = {
-    "draft": ["active", "terminated", "expired"],
-    "active": ["completed", "terminated", "expired"],
+    "draft": ["active", "terminated"],
+    "active": ["executing", "terminated"],
+    "executing": ["completed", "terminated"],
     "completed": [],
     "terminated": [],
-    "expired": [],
 }
 
 VERSION_SNAPSHOT_FIELDS = [
@@ -98,11 +113,13 @@ VERSION_SNAPSHOT_FIELDS = [
     "party_a", "party_b_id", "party_b_name", "company_name",
     "region_id", "region_name", "sign_date", "status", "notes",
     "total_cost", "progress", "expected_income",
+    "contract_amount", "contract_period", "owner", "attachment",
 ]
 
 
-def _validate_status_transition(old_status, new_status, approval_status) -> Optional[str]:
-    """校验 status 流转合法性；合法返回 None，非法返回错误信息（中文）。"""
+def _validate_status_transition(old_status, new_status, approval_status=None) -> Optional[str]:
+    """校验 status 流转合法性；合法返回 None，非法返回错误信息（中文）。
+    v1.3.1：审批参数保留兼容调用，不再参与校验（审批流已废弃）。"""
     if new_status is None or new_status == old_status:
         return None
     old_status = old_status or ""
@@ -111,9 +128,7 @@ def _validate_status_transition(old_status, new_status, approval_status) -> Opti
     if old_status and old_status not in CONTRACT_STATUSES:
         return f"合同当前状态异常：{old_status}，无法流转"
     if new_status not in STATUS_TRANSITIONS.get(old_status, []):
-        return f"不允许的状态流转：{old_status or '（空）'} → {new_status}（允许：draft→active→completed/terminated）"
-    if new_status == "active" and approval_status != "approved":
-        return "合同未审批通过，无法进入执行状态"
+        return f"不允许的状态流转：{old_status or '（空）'} → {new_status}（允许：草稿→有效→执行中→完成/终止）"
     return None
 
 
@@ -163,6 +178,11 @@ def _serialize_item(it: ContractItem) -> dict:
         "carbon_factor": it.carbon_factor,
         "total_cost": it.total_cost,
         "expected_income": it.expected_income,
+        # v1.3.1 金融化投资字段
+        "investment_type": it.investment_type or "",
+        "equity_ratio": it.equity_ratio or 0,
+        "expected_return_rate": it.expected_return_rate or 0,
+        "investment_period": it.investment_period or "",
     }
 
 
@@ -196,7 +216,9 @@ def _build_snapshot(contract_dict: dict) -> dict:
         snap["items"] = [
             {k: it.get(k) for k in ("item_name", "quantity", "unit_price", "land_area",
                                     "tax_rate", "skill_level", "carbon_factor",
-                                    "expected_income", "total_cost") if it.get(k) is not None}
+                                    "expected_income", "total_cost",
+                                    "investment_type", "equity_ratio",
+                                    "expected_return_rate", "investment_period") if it.get(k) is not None}
             for it in contract_dict["items"]
         ]
     return snap
@@ -531,8 +553,10 @@ def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: U
                 # 冲突重试：追加随机后缀彻底避免同号（count 在并发下不随重试变化）
                 contract_no = f"{prefix}-{year}-{seq:04d}-{random.randint(1000, 9999)}"
 
-            # 与桌面端一致：新建合同固定 draft/none（审批通过后才能进入执行），金额由明细计算
+            # v1.3.1 金融化：创建即生效（active），无审批流；金额=合同金额或明细投资总额
             total_cost, expected_income = _compute_amounts(data.contract_type_id, data.items)
+            if data.contract_amount is not None:
+                total_cost = data.contract_amount
             contract = Contract(
                 contract_no=contract_no,
                 contract_name=data.contract_name,
@@ -542,11 +566,15 @@ def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: U
                 party_b_id=data.party_b_id,
                 region_id=data.region_id,
                 sign_date=data.sign_date,
-                status="draft",
+                status="active",
                 approval_status="none",
                 notes=data.notes,
                 total_cost=total_cost,
                 expected_income=expected_income,
+                contract_amount=data.contract_amount if data.contract_amount is not None else total_cost,
+                contract_period=data.contract_period or "",
+                owner=data.owner or "",
+                attachment=data.attachment or "",
                 created_by=user.username,
                 updated_by=user.username,
             )
@@ -565,6 +593,10 @@ def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: U
                     carbon_factor=item.carbon_factor,
                     total_cost=item.total_cost,
                     expected_income=item.expected_income,
+                    investment_type=item.investment_type,
+                    equity_ratio=item.equity_ratio,
+                    expected_return_rate=item.expected_return_rate,
+                    investment_period=item.investment_period,
                     sort_order=idx,
                 ))
 
@@ -624,10 +656,10 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
     if changed:
         _save_version_snapshot(db, contract_id, old_row, changed, operator)
 
-    # 字段更新（白名单：审批字段只能经 approve 状态机修改）
+    # 字段更新（v1.3.1 金融化：审批字段弃用，新增金融字段可编辑）
     for f in ("contract_name", "contract_type_id", "party_a", "party_b_name", "party_b_id",
               "region_id", "sign_date", "status", "notes", "total_cost", "progress",
-              "expected_income"):
+              "expected_income", "contract_amount", "contract_period", "owner", "attachment"):
         v = getattr(data, f, None)
         if v is not None:
             setattr(c, f, v)
@@ -664,6 +696,10 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
                 carbon_factor=item.carbon_factor,
                 total_cost=tc,
                 expected_income=ei,
+                investment_type=item.investment_type,
+                equity_ratio=item.equity_ratio,
+                expected_return_rate=item.expected_return_rate,
+                investment_period=item.investment_period,
                 sort_order=idx,
             ))
             # 重算用继承后的明细（含 tc/ei）——避免用原始 items 重算又归零
@@ -673,19 +709,17 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
                 tax_rate=item.tax_rate, skill_level=item.skill_level,
                 carbon_factor=item.carbon_factor,
                 total_cost=tc, expected_income=ei,
+                investment_type=item.investment_type,
+                equity_ratio=item.equity_ratio,
+                expected_return_rate=item.expected_return_rate,
+                investment_period=item.investment_period,
             ))
         tc, ei = _compute_amounts(c.contract_type_id or data.contract_type_id, merged_items)
         c.total_cost = tc
         c.expected_income = ei
     db.flush()
 
-    # ── 资金流水登记（与状态更新同一事务：任一步失败整体回滚，状态不变更）──
-    is_approved = c.approval_status == "approved"
-    if is_approved:
-        if data.status == "active" and not _has_contract_transaction(db, contract_id, "expense", "合同支出"):
-            _register_contract_expense(db, c, operator)  # 余额不足抛 400 → 整体回滚
-        if data.status == "completed" and not _has_contract_transaction(db, contract_id, "income", "合同收入"):
-            _register_contract_income(db, c, operator)
+    # ── v1.3.1 金融化：审批自动入账已废弃（资金入账走资金模块手动操作）──
 
     # 审计日志
     insert_audit_log(db, username=operator, role=user.role, action="update", target="contract",

@@ -66,15 +66,20 @@ class Contract(Base):
     party_b_name = Column(String, default="")
     region_id = Column(Integer, ForeignKey("regions.id"), nullable=True)
     sign_date = Column(String, nullable=True)
-    status = Column(String, default="draft")
+    status = Column(String, default="draft")  # v1.3.1 金融化：draft/active/executing/completed/terminated
     notes = Column(Text, default="")
     # ── P0-2 补字段：与桌面端 Contract 类型对齐 ──
-    total_cost = Column(Float, default=0)          # 合同级总成本（含税，create/update 时由明细计算）
-    expected_income = Column(Float, default=0)     # 合同级预期收入
-    approval_status = Column(String, default="none")  # none / pending / approved / rejected
+    total_cost = Column(Float, default=0)          # 合同级总成本（投资合同=投资总额）
+    expected_income = Column(Float, default=0)     # 合同级预期收益
+    approval_status = Column(String, default="none")  # v1.3.1 弃用（保留列兼容历史数据）
     approved_by = Column(String, default="")
-    approved_at = Column(String, nullable=True)    # 审批时间（本地 SQLite 为 'YYYY-MM-DD HH:MM:SS' 文本）
+    approved_at = Column(String, nullable=True)
     progress = Column(Float, default=0)
+    # ── v1.3.1 金融化新字段 ──
+    contract_amount = Column(Float, default=0)     # 合同金额（总投资额）
+    contract_period = Column(String, default="")   # 合同期限（如：3年）
+    owner = Column(String, default="")             # 负责人
+    attachment = Column(String, default="")        # 附件名/路径
     created_by = Column(String, default="")
     updated_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -107,9 +112,14 @@ class ContractItem(Base):
     skill_level = Column(Float, default=0)
     carbon_factor = Column(Float, default=0)
     # P0-2 补字段：明细级金额（投资合同=投资总额/预期收益、拨款合同=拨款金额）
-    total_cost = Column(Float, nullable=True, default=None)      # None=未显式录入（按数量×单价推算）
-    expected_income = Column(Float, nullable=True, default=None)
+    total_cost = Column(Float, nullable=True, default=None)      # 投资金额（原总成本）
+    expected_income = Column(Float, nullable=True, default=None) # 预期收益
     sort_order = Column(Integer, default=0)
+    # ── v1.3.1 金融化：投资项目字段（全面替代工程类数量/单价明细）──
+    investment_type = Column(String, default="")      # 股权投资/债权投资/基金投资/项目投资/其他
+    equity_ratio = Column(Float, default=0)           # 占股比例（%）
+    expected_return_rate = Column(Float, default=0)   # 预期收益率（%）
+    investment_period = Column(String, default="")    # 投资期限（如：2年）
 
     contract = relationship("Contract", back_populates="items")
 
