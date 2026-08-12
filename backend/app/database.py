@@ -45,7 +45,11 @@ def commit_with_retry(db, max_retries=2, base_delay=0.05):
     """P1-3 写操作重试：WAL 下锁冲突概率已大幅降低，但极端并发仍可能
     `database is locked`。提交失败按 50ms → 100ms 退避重试（默认 2 次），
     全部失败则抛出原始异常（由路由层转 500）。
-    """
+
+    审核 P0-4 修复：重试前**不 rollback**——rollback 会丢弃本次会话全部
+    未提交改动（流水/余额/合同），重试提交的是空事务 = 接口 200 但账没动。
+    改为仅回滚到 savepoint 前状态不可行（SQLAlchemy 无内建），故直接重试
+    commit（WAL busy 时同一事务数据仍在，重试可成功）；全部失败抛异常。"""
     import time
 
     for attempt in range(max_retries + 1):
@@ -55,7 +59,7 @@ def commit_with_retry(db, max_retries=2, base_delay=0.05):
         except Exception:
             if attempt >= max_retries:
                 raise
-            db.rollback()
+            # P0-4：不 rollback（保数据）；仅退避后重试 commit
             time.sleep(base_delay * (2 ** attempt))
 
 
