@@ -95,8 +95,13 @@ def create_user(data: CreateUserReq, db: Session = Depends(get_db),
     """管理端创建用户（对齐桌面端 AUTH_CREATE_USER，支持公司绑定 org_id）。"""
     if len(data.username) < 2:
         raise HTTPException(400, "用户名至少2个字符")
+    # v1.3.1 密码规则：至少6位 + 含字母 + 含数字（用户明确要求）
     if len(data.password) < 6:
         raise HTTPException(400, "密码至少6个字符")
+    if not any(c.isalpha() for c in data.password) or not any(c.isdigit() for c in data.password):
+        raise HTTPException(400, "密码必须同时包含字母和数字")
+    if data.role not in ("admin", "operator", "user", "rep"):
+        raise HTTPException(400, f"角色无效: {data.role}")
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(400, "用户名已存在")
     if data.org_id is not None:
@@ -117,7 +122,7 @@ def create_user(data: CreateUserReq, db: Session = Depends(get_db),
         if invalid:
             raise HTTPException(400, f"所属公司不存在: {invalid}")
     user = User(username=data.username, password=hash_password(data.password),
-                role=data.role if data.role in ("admin", "operator", "user", "rep") else "user",
+                role=data.role,
                 org_id=data.org_id)
     db.add(user)
     commit_with_retry(db)
