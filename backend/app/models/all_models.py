@@ -118,8 +118,9 @@ class ContractItem(Base):
     # ── v1.3.1 金融化：投资项目字段（全面替代工程类数量/单价明细）──
     investment_type = Column(String, default="")      # 股权投资/债权投资/基金投资/项目投资/其他
     equity_ratio = Column(Float, default=0)           # 占股比例（%）
-    expected_return_rate = Column(Float, default=0)   # 预期收益率（%）
-    investment_period = Column(String, default="")    # 投资期限（如：2年）
+    # v1.3.1-2 用户拍板替换：预期收益率/预期收益/投资期限 → 股数/股价
+    shares = Column(Integer, default=0)               # 股数（投资股票数量）
+    price = Column(Float, default=0)                  # 股价（每股价格）
 
     contract = relationship("Contract", back_populates="items")
 

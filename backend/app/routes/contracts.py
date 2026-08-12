@@ -42,8 +42,9 @@ class ItemData(BaseModel):
     # ── v1.3.1 金融化投资项目字段（Optional：未传=None → 云端继承旧值防清空）──
     investment_type: Optional[str] = None
     equity_ratio: Optional[float] = None
-    expected_return_rate: Optional[float] = None
-    investment_period: Optional[str] = None
+    # v1.3.1-2 用户拍板：股数/股价 替换 预期收益率/预期收益/投资期限
+    shares: Optional[int] = None
+    price: Optional[float] = None
 
 
 class ContractCreate(BaseModel):
@@ -181,8 +182,8 @@ def _serialize_item(it: ContractItem) -> dict:
         # v1.3.1 金融化投资字段
         "investment_type": it.investment_type or "",
         "equity_ratio": it.equity_ratio or 0,
-        "expected_return_rate": it.expected_return_rate or 0,
-        "investment_period": it.investment_period or "",
+        "shares": it.shares or 0,
+        "price": it.price or 0,
     }
 
 
@@ -218,7 +219,7 @@ def _build_snapshot(contract_dict: dict) -> dict:
                                     "tax_rate", "skill_level", "carbon_factor",
                                     "expected_income", "total_cost",
                                     "investment_type", "equity_ratio",
-                                    "expected_return_rate", "investment_period") if it.get(k) is not None}
+                                    "shares", "price") if it.get(k) is not None}
             for it in contract_dict["items"]
         ]
     return snap
@@ -601,8 +602,8 @@ def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: U
                     expected_income=item.expected_income,
                     investment_type=item.investment_type or "项目投资",
                     equity_ratio=item.equity_ratio or 0,
-                    expected_return_rate=item.expected_return_rate or 0,
-                    investment_period=item.investment_period or "",
+                    shares=item.shares or 0,
+                    price=item.price or 0,
                     sort_order=idx,
                 ))
 
@@ -692,8 +693,8 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
             # 投资字段继承（v1.3.1 审核加固：旧版前端/部分字段更新不传时继承旧值，防清空）
             itype = item.investment_type
             eratio = item.equity_ratio
-            erate = item.expected_return_rate
-            iperiod = item.investment_period
+            ishares = item.shares
+            iprice = item.price
             if (tc is None or tc <= 0) and old is not None and old.total_cost and old.total_cost > 0:
                 tc = old.total_cost  # 继承旧明细显式金额（防推算归零）
             if (ei is None or ei <= 0) and old is not None and old.expected_income and old.expected_income > 0:
@@ -702,10 +703,10 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
                 itype = old.investment_type
             if eratio is None and old is not None and old.equity_ratio:
                 eratio = old.equity_ratio
-            if erate is None and old is not None and old.expected_return_rate:
-                erate = old.expected_return_rate
-            if not iperiod and old is not None and old.investment_period:
-                iperiod = old.investment_period
+            if ishares is None and old is not None and old.shares:
+                ishares = old.shares
+            if iprice is None and old is not None and old.price:
+                iprice = old.price
             db.add(ContractItem(
                 contract_id=contract_id,
                 item_name=item.item_name,
@@ -719,8 +720,8 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
                 expected_income=ei,
                 investment_type=itype,
                 equity_ratio=eratio,
-                expected_return_rate=erate,
-                investment_period=iperiod,
+                shares=ishares,
+                price=iprice,
                 sort_order=idx,
             ))
             # 重算用继承后的明细（含 tc/ei + 投资字段继承值）——避免用原始 items 重算又归零
@@ -732,8 +733,8 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
                 total_cost=tc, expected_income=ei,
                 investment_type=itype or "项目投资",
                 equity_ratio=eratio or 0,
-                expected_return_rate=erate or 0,
-                investment_period=iperiod or "",
+                shares=ishares or 0,
+                price=iprice or 0,
             ))
         tc, ei = _compute_amounts(c.contract_type_id or data.contract_type_id, merged_items)
         c.total_cost = tc
