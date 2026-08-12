@@ -1,5 +1,6 @@
 """认证路由"""
 import os
+import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
@@ -152,7 +153,7 @@ def reset_password(user_id: int, data: ResetPasswordReq, db: Session = Depends(g
     target.password = hash_password(new_pwd)
     insert_audit_log(db, username=admin.username, role=admin.role, action="reset_password",
                      target="user", target_id=user_id,
-                     new_value=f'{{"username": "{target.username}", "role": "{target.role}"}}')
+                     new_value=json.dumps({"username": target.username, "role": target.role}, ensure_ascii=False))
     db.commit()
     return {"success": True, "isSelf": admin.id == user_id}
 
@@ -167,7 +168,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depen
         raise HTTPException(404, "用户不存在")
     insert_audit_log(db, username=admin.username, role=admin.role, action="delete",
                      target="user", target_id=user_id,
-                     old_value=f'{{"username": "{target.username}", "role": "{target.role}"}}')
+                     old_value=json.dumps({"username": target.username, "role": target.role}, ensure_ascii=False))
     db.delete(target)
     db.commit()
     return {"success": True}
@@ -200,6 +201,9 @@ def change_password(req: ChangePasswordReq, user: User = Depends(get_current_use
         raise HTTPException(400, "原密码错误")
     if len(req.new_password) < 6:
         raise HTTPException(400, "新密码至少6个字符")
+    # v1.3.1 审核加固：与建号/重置规则一致（含字母和数字）
+    if not any(c.isalpha() for c in req.new_password) or not any(c.isdigit() for c in req.new_password):
+        raise HTTPException(400, "新密码必须同时包含字母和数字")
     user.password = hash_password(req.new_password)
     db.commit()
     return {"message": "密码修改成功"}

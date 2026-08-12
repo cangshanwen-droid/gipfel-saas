@@ -39,11 +39,11 @@ class ItemData(BaseModel):
     carbon_factor: float = 0
     total_cost: Optional[float] = None   # 投资金额（原总成本）
     expected_income: Optional[float] = None
-    # ── v1.3.1 金融化投资项目字段 ──
-    investment_type: str = ""            # 股权投资/债权投资/基金投资/项目投资/其他
-    equity_ratio: float = 0              # 占股比例（%）
-    expected_return_rate: float = 0      # 预期收益率（%）
-    investment_period: str = ""          # 投资期限
+    # ── v1.3.1 金融化投资项目字段（Optional：未传=None → 云端继承旧值防清空）──
+    investment_type: Optional[str] = None
+    equity_ratio: Optional[float] = None
+    expected_return_rate: Optional[float] = None
+    investment_period: Optional[str] = None
 
 
 class ContractCreate(BaseModel):
@@ -518,16 +518,22 @@ def get_contract(contract_id: int, db: Session = Depends(get_db),
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c:
         raise HTTPException(404, "合同不存在")
-    # H2 数据隔离（v1.3.0 多公司）：admin 全量；rep/operator 仅可看绑定公司合同
-    if user.role != "admin":
-        org_ids = user.company_org_ids
-        if not org_ids:
-            raise HTTPException(403, "无权查看该合同")
-        my_companies = [r[0] for r in db.query(Company.id).filter(
-            Company.org_id.in_(org_ids)).all()]
-        if not my_companies or c.party_b_id not in my_companies:
-            raise HTTPException(403, "无权查看其他公司的合同")
+    _assert_contract_access(db, user, c)
     return _contract_row(db, c)
+
+
+def _assert_contract_access(db: Session, user: User, c: Contract):
+    """v1.3.1 审核加固：合同公司归属校验（admin 全量；rep/operator 限绑定公司）。
+    供 get/update/approve/list_versions/batch/delete 共用，消除四处重复隔离逻辑。"""
+    if user.role == "admin":
+        return
+    org_ids = user.company_org_ids
+    if not org_ids:
+        raise HTTPException(403, "无权访问该合同")
+    my_companies = [r[0] for r in db.query(Company.id).filter(
+        Company.org_id.in_(org_ids)).all()]
+    if not my_companies or c.party_b_id not in my_companies:
+        raise HTTPException(403, "无权访问其他公司的合同")
 
 
 @router.post("")
@@ -593,10 +599,10 @@ def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: U
                     carbon_factor=item.carbon_factor,
                     total_cost=item.total_cost,
                     expected_income=item.expected_income,
-                    investment_type=item.investment_type,
-                    equity_ratio=item.equity_ratio,
-                    expected_return_rate=item.expected_return_rate,
-                    investment_period=item.investment_period,
+                    investment_type=item.investment_type or "项目投资",
+                    equity_ratio=item.equity_ratio or 0,
+                    expected_return_rate=item.expected_return_rate or 0,
+                    investment_period=item.investment_period or "",
                     sort_order=idx,
                 ))
 
@@ -635,6 +641,8 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c:
         raise HTTPException(404, "合同不存在")
+    # v1.3.1 审核加固：operator 仅可编辑本公司合同
+    _assert_contract_access(db, user, c)
 
     # ── v1.3.0 乐观锁：客户端传 expected_version 时校验版本（防并发编辑后写覆盖先写）──
     if data.expected_version is not None:
@@ -681,10 +689,23 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
             old = old_items.get(item.item_name or "")
             tc = item.total_cost
             ei = item.expected_income
+            # 投资字段继承（v1.3.1 审核加固：旧版前端/部分字段更新不传时继承旧值，防清空）
+            itype = item.investment_type
+            eratio = item.equity_ratio
+            erate = item.expected_return_rate
+            iperiod = item.investment_period
             if (tc is None or tc <= 0) and old is not None and old.total_cost and old.total_cost > 0:
                 tc = old.total_cost  # 继承旧明细显式金额（防推算归零）
             if (ei is None or ei <= 0) and old is not None and old.expected_income and old.expected_income > 0:
                 ei = old.expected_income
+            if not itype and old is not None and old.investment_type:
+                itype = old.investment_type
+            if eratio is None and old is not None and old.equity_ratio:
+                eratio = old.equity_ratio
+            if erate is None and old is not None and old.expected_return_rate:
+                erate = old.expected_return_rate
+            if not iperiod and old is not None and old.investment_period:
+                iperiod = old.investment_period
             db.add(ContractItem(
                 contract_id=contract_id,
                 item_name=item.item_name,
@@ -696,23 +717,23 @@ def update_contract(contract_id: int, data: ContractUpdate, db: Session = Depend
                 carbon_factor=item.carbon_factor,
                 total_cost=tc,
                 expected_income=ei,
-                investment_type=item.investment_type,
-                equity_ratio=item.equity_ratio,
-                expected_return_rate=item.expected_return_rate,
-                investment_period=item.investment_period,
+                investment_type=itype,
+                equity_ratio=eratio,
+                expected_return_rate=erate,
+                investment_period=iperiod,
                 sort_order=idx,
             ))
-            # 重算用继承后的明细（含 tc/ei）——避免用原始 items 重算又归零
+            # 重算用继承后的明细（含 tc/ei + 投资字段继承值）——避免用原始 items 重算又归零
             merged_items.append(ItemData(
                 item_name=item.item_name or "", quantity=item.quantity,
                 unit_price=item.unit_price, land_area=item.land_area,
                 tax_rate=item.tax_rate, skill_level=item.skill_level,
                 carbon_factor=item.carbon_factor,
                 total_cost=tc, expected_income=ei,
-                investment_type=item.investment_type,
-                equity_ratio=item.equity_ratio,
-                expected_return_rate=item.expected_return_rate,
-                investment_period=item.investment_period,
+                investment_type=itype or "项目投资",
+                equity_ratio=eratio or 0,
+                expected_return_rate=erate or 0,
+                investment_period=iperiod or "",
             ))
         tc, ei = _compute_amounts(c.contract_type_id or data.contract_type_id, merged_items)
         c.total_cost = tc
@@ -751,6 +772,8 @@ def approve_contract(contract_id: int, data: ApproveReq, db: Session = Depends(g
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c:
         raise HTTPException(404, "合同不存在")
+    # v1.3.1 审核加固：operator 仅可审批本公司合同
+    _assert_contract_access(db, user, c)
 
     operator = user.username
     before_row = _contract_row(db, c)
@@ -793,7 +816,10 @@ def approve_contract(contract_id: int, data: ApproveReq, db: Session = Depends(g
 @router.post("/batch-approve")
 def batch_approve(data: BatchApproveReq, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """批量审批/删除：逐条独立 savepoint，单条失败不影响其他条；
-    返回与桌面端一致的 {success, results, summary}。"""
+    返回与桌面端一致的 {success, results, summary}。
+    v1.3.1 审核加固：仅 admin/operator；逐条校验公司归属；delete 复用禁删保护。"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权批量操作合同（仅管理员/主席）")
     id_list = [n for n in data.ids if isinstance(n, int)]
     if not id_list:
         raise HTTPException(400, "未选择任何合同")
@@ -808,8 +834,18 @@ def batch_approve(data: BatchApproveReq, db: Session = Depends(get_db), user: Us
                 c = db.query(Contract).filter(Contract.id == cid).first()
                 if not c:
                     raise HTTPException(404, "合同不存在")
+                # 审核加固：公司归属校验（admin 全量；operator 限绑定公司）
+                _assert_contract_access(db, user, c)
                 before_row = _contract_row(db, c)
                 if data.action == "delete":
+                    # 复用 delete_contract 的禁删保护（active/completed 禁删，防幂等误判）
+                    if c.status in ("active", "completed"):
+                        raise HTTPException(400, "已执行或已完成的合同不能删除，请使用「终止合同」")
+                    # 同步清理关联流水（防 AUTOINCREMENT 重置后 id 复用命中旧流水）
+                    db.query(AccountTransaction).filter(
+                        AccountTransaction.contract_id == cid,
+                        AccountTransaction.source_type == "contract",
+                    ).delete(synchronize_session=False)
                     db.delete(c)
                     insert_audit_log(db, username=operator, role=user.role, action="delete", target="contract",
                                      target_id=cid,
@@ -854,10 +890,13 @@ def batch_approve(data: BatchApproveReq, db: Session = Depends(get_db), user: Us
 
 
 @router.get("/{contract_id}/versions")
-def list_versions(contract_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """合同版本历史：按版本号升序返回快照（对齐桌面端 CONTRACT_LIST_VERSIONS）。"""
-    if not db.query(Contract.id).filter(Contract.id == contract_id).first():
+def list_versions(contract_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """合同版本历史：按版本号升序返回快照（对齐桌面端 CONTRACT_LIST_VERSIONS）。
+    v1.3.1 审核加固：公司归属校验（rep 不可读他司快照）。"""
+    c = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not c:
         raise HTTPException(404, "合同不存在")
+    _assert_contract_access(db, user, c)
     rows = db.query(ContractVersion).filter(ContractVersion.contract_id == contract_id) \
         .order_by(ContractVersion.version.asc()).all()
     result = []
@@ -884,9 +923,14 @@ def list_versions(contract_id: int, db: Session = Depends(get_db), _=Depends(get
 
 @router.delete("/{contract_id}")
 def delete_contract(contract_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """删除合同（v1.3.1 审核加固：仅 admin/operator + 公司归属校验）"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权删除合同（仅管理员/主席）")
     c = db.query(Contract).filter(Contract.id == contract_id).first()
     if not c:
         raise HTTPException(404, "合同不存在")
+    # 审核加固：公司归属校验（operator 限绑定公司）
+    _assert_contract_access(db, user, c)
     # 交付验收修复：已入账合同禁止删除（防 id 复用后流水误判幂等）
     if c.status in ("active", "completed"):
         raise HTTPException(400, "已执行或已完成的合同不能删除，请使用「终止合同」")

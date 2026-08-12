@@ -1,6 +1,6 @@
 """Excel 导入导出"""
 import io
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from openpyxl import Workbook
@@ -28,7 +28,11 @@ TABLE_MAP = {
 
 
 @router.get("/export")
-def export_excel(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def export_excel(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin/operator 可导出（rep 无导出权限——
+    原实现导出全量跨租户数据，rep 可拿全平台财务流水）。"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权导出数据（仅管理员/主席）")
     wb = Workbook()
     wb.remove(wb.active)
 

@@ -62,8 +62,11 @@ def get_current_user(
     token = credentials.credentials
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        user_id = int(payload.get("sub"))
-    except (JWTError, ValueError):
+        sub = payload.get("sub")
+        if sub is None:
+            raise HTTPException(status_code=401, detail="无效的认证令牌")
+        user_id = int(sub)
+    except (JWTError, ValueError, TypeError, HTTPException):
         raise HTTPException(status_code=401, detail="无效的认证令牌")
 
     user = db.query(User).filter(User.id == user_id).first()

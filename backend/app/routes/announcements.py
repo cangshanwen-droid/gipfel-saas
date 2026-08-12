@@ -51,6 +51,10 @@ def active_announcements(region_id: Optional[int] = None,
 @router.post("")
 def create_announcement(data: AnnouncementCreate, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin/operator 可发布公告（rep 只读）。
+    created_by 保持可自定义（用户需求：发布者字段可手动修改）。"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权发布公告（仅管理员/主席）")
     if not data.title.strip():
         raise HTTPException(400, "公告标题不能为空")
     if data.region_id is not None and not db.query(Region.id).filter(Region.id == data.region_id).first():
@@ -76,7 +80,10 @@ def create_announcement(data: AnnouncementCreate, db: Session = Depends(get_db),
 
 @router.delete("/{announcement_id}")
 def delete_announcement(announcement_id: int, db: Session = Depends(get_db),
-                        _=Depends(get_current_user)):
+                        user: User = Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin/operator 可删除公告"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权删除公告（仅管理员/主席）")
     a = db.query(Announcement).filter(Announcement.id == announcement_id).first()
     if not a:
         raise HTTPException(404, "公告不存在")

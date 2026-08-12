@@ -8,6 +8,7 @@ P0-1 修复：补齐 ROUTE_MAP 指向的缺失路由：
 """
 from typing import Optional
 from datetime import datetime
+import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -15,11 +16,25 @@ from sqlalchemy.orm import Session
 
 from ..auth import get_current_user
 from ..database import get_db, commit_with_retry
-from ..models import AccountTransaction, Region, RegionAccount, User
+from ..models import AccountTransaction, Region, RegionAccount, User, Company
 from ..services.audit import insert_audit_log
 from ..services.notify import notify_account_managers
 
 router = APIRouter()
+
+
+def _user_region_ids(db: Session, user: User) -> set:
+    """v1.3.1 审核加固：用户公司 → 区域 id 集合（rep 隔离用）。
+    链：company_org_ids(组织) → Company.org_id → Company.region(名称) → Region.name → Region.id"""
+    org_ids = user.company_org_ids or ([user.org_id] if user.org_id else [])
+    region_ids = set()
+    for org_id in org_ids:
+        comp = db.query(Company).filter(Company.org_id == org_id).first()
+        if comp and comp.region:
+            reg = db.query(Region).filter(Region.name == comp.region).first()
+            if reg:
+                region_ids.add(reg.id)
+    return region_ids
 
 
 class AccountCreate(BaseModel):
@@ -42,14 +57,19 @@ class TransactionCreate(BaseModel):
 
 
 @router.get("")
-def list_accounts(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_accounts(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     accounts = db.query(RegionAccount).order_by(RegionAccount.is_master.desc(), RegionAccount.region_id).all()
+    # v1.3.1 审核加固：rep 仅可见本公司区域账户（admin/operator 全量）
+    if user.role == "rep":
+        accounts = [a for a in accounts if a.region_id in _user_region_ids(db, user)]
     return _with_region_name(db, accounts)
 
 
 @router.get("/summary/all")
-def accounts_summary(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def accounts_summary(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     accounts = db.query(RegionAccount).order_by(RegionAccount.is_master.desc(), RegionAccount.region_id).all()
+    if user.role == "rep":
+        accounts = [a for a in accounts if a.region_id in _user_region_ids(db, user)]
     rows = _with_region_name(db, accounts)
     total_balance = sum((a.balance or 0) for a in rows)
     region_count = sum(1 for a in rows if not a.is_master)
@@ -68,7 +88,10 @@ def account_years(db: Session = Depends(get_db), _=Depends(get_current_user)):
 @router.post("")
 def create_account(data: AccountCreate, db: Session = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    """创建区域账户（对齐桌面端 ACCOUNT_CREATE：初始余额不允许为负）。"""
+    """创建区域账户（对齐桌面端 ACCOUNT_CREATE：初始余额不允许为负）。
+    v1.3.1 审核加固：仅 admin/operator。"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权创建账户（仅管理员/主席）")
     if not db.query(Region.id).filter(Region.id == data.region_id).first():
         raise HTTPException(400, "区域不存在")
     initial_balance = float(data.initial_balance or 0)
@@ -91,16 +114,25 @@ def create_account(data: AccountCreate, db: Session = Depends(get_db),
 
 
 @router.get("/{account_id}")
-def get_account(account_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_account(account_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     a = db.query(RegionAccount).filter(RegionAccount.id == account_id).first()
     if not a:
         raise HTTPException(404, "账户不存在")
+    # v1.3.1 审核加固：rep 仅可见本公司区域账户
+    if user.role == "rep" and a.region_id not in _user_region_ids(db, user):
+        raise HTTPException(403, "无权查看其他公司的账户")
     return _with_region_name(db, [a])[0]
 
 
 @router.get("/{account_id}/transactions")
 def list_transactions(account_id: int, fiscal_year: Optional[int] = None,
-                      db: Session = Depends(get_db), _=Depends(get_current_user)):
+                      db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    a = db.query(RegionAccount).filter(RegionAccount.id == account_id).first()
+    if not a:
+        raise HTTPException(404, "账户不存在")
+    # v1.3.1 审核加固：rep 仅可见本公司区域账户流水
+    if user.role == "rep" and a.region_id not in _user_region_ids(db, user):
+        raise HTTPException(403, "无权查看其他公司的账户流水")
     q = db.query(AccountTransaction).filter(AccountTransaction.account_id == account_id)
     if fiscal_year:
         q = q.filter(AccountTransaction.fiscal_year == fiscal_year)
@@ -111,7 +143,10 @@ def list_transactions(account_id: int, fiscal_year: Optional[int] = None,
 def add_transaction(data: TransactionCreate, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
     """入账 + 余额更新（同一事务）；支出余额不足 → 400，不允许负余额。
-    对齐桌面端 ACCOUNT_ADD_TRANSACTION 的校验与原子性。"""
+    对齐桌面端 ACCOUNT_ADD_TRANSACTION 的校验与原子性。
+    v1.3.1 审核加固：仅 admin/operator 可入账；rep 只读。"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权入账（仅管理员/主席）")
     if data.trans_type not in ("income", "expense"):
         raise HTTPException(400, f"非法交易类型：{data.trans_type}（仅支持 income / expense）")
     amount = float(data.amount)
@@ -123,6 +158,9 @@ def add_transaction(data: TransactionCreate, db: Session = Depends(get_db),
     account = db.query(RegionAccount).filter(RegionAccount.id == data.account_id).first()
     if not account:
         raise HTTPException(404, "账户不存在")
+    # v1.3.1 审核加固：operator 仅可操作本公司区域账户
+    if user.role == "operator" and account.region_id not in _user_region_ids(db, user):
+        raise HTTPException(403, "无权操作其他公司的账户")
     if data.trans_type == "expense" and (account.balance or 0) < amount:
         raise HTTPException(400, f"余额不足：账户余额 {(account.balance or 0):.2f}")
     txn = AccountTransaction(
@@ -163,7 +201,9 @@ def add_transaction(data: TransactionCreate, db: Session = Depends(get_db),
     insert_audit_log(db, username=user.username, role=user.role,
                      action="income" if data.trans_type == "income" else "expense",
                      target="transaction", target_id=data.account_id,
-                     new_value=f'{{"trans_type": "{data.trans_type}", "amount": {amount}, "category": "{data.category}", "description": "{data.description}", "contract_id": {data.contract_id}}}')
+                     new_value=json.dumps({"trans_type": data.trans_type, "amount": amount,
+                                           "category": data.category, "description": data.description,
+                                           "contract_id": data.contract_id}, ensure_ascii=False))
     try:
         region_name = db.query(Region.name).filter(Region.id == account.region_id).scalar() or ""
         sign_str = "+" if data.trans_type == "income" else "-"

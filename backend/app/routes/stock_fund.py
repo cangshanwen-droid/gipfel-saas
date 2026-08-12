@@ -103,6 +103,10 @@ def stock_fund_transaction(req_body: dict,
         raise HTTPException(400, "参数格式错误")
     if not username or not side or side not in ("buy", "sell"):
         raise HTTPException(400, "username / side(buy|sell) 必填")
+    # ── P0-1 修复：sell（加款）仅允许内部密钥调用（stock-api 回环可信）──
+    # JWT 登录用户禁 sell——否则任何人可给自己区域账户凭空注入资金（审核发现）
+    if side == "sell" and user is not None:
+        raise HTTPException(403, "加款操作仅限内部服务调用（股票卖出闭环）")
     if amount <= 0:
         raise HTTPException(400, "amount 必须大于 0")
     if not idem_key:

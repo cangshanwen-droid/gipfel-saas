@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from ..database import get_db
-from ..models import Region
+from ..models import Region, User
 from ..auth import get_current_user
 
 router = APIRouter()
@@ -38,7 +38,10 @@ def get_region(region_id: int, db: Session = Depends(get_db), _=Depends(get_curr
     return r
 
 @router.post("")
-def create_region(data: RegionCreate, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def create_region(data: RegionCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin/operator 可创建区域（rep 只读）"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权创建区域（仅管理员/主席）")
     r = Region(**data.model_dump())
     db.add(r)
     db.commit()
@@ -46,7 +49,10 @@ def create_region(data: RegionCreate, db: Session = Depends(get_db), _=Depends(g
     return r
 
 @router.put("/{region_id}")
-def update_region(region_id: int, data: RegionUpdate, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def update_region(region_id: int, data: RegionUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin/operator 可改区域（rep 只读）"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权修改区域（仅管理员/主席）")
     r = db.query(Region).filter(Region.id == region_id).first()
     if not r: raise HTTPException(404, "区域不存在")
     for k, v in data.model_dump(exclude_unset=True).items():
@@ -55,7 +61,10 @@ def update_region(region_id: int, data: RegionUpdate, db: Session = Depends(get_
     return r
 
 @router.delete("/{region_id}")
-def delete_region(region_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def delete_region(region_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin 可删区域（rep/operator 只读）"""
+    if user.role != "admin":
+        raise HTTPException(403, "无权删除区域（仅管理员）")
     r = db.query(Region).filter(Region.id == region_id).first()
     if not r: raise HTTPException(404, "区域不存在")
     db.delete(r)

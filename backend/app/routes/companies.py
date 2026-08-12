@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from ..database import get_db
-from ..models import Company, Organization
+from ..models import Company, Organization, User
 from ..auth import get_current_user
 
 router = APIRouter()
@@ -41,7 +41,10 @@ def get_company(company_id: int, db: Session = Depends(get_db), _=Depends(get_cu
     return c
 
 @router.post("")
-def create_company(data: CompanyCreate, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def create_company(data: CompanyCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin/operator 可创建公司（rep 只读）"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权创建公司（仅管理员/主席）")
     c = Company(**data.model_dump())
     db.add(c)
     db.flush()
@@ -60,7 +63,10 @@ def create_company(data: CompanyCreate, db: Session = Depends(get_db), _=Depends
     return c
 
 @router.put("/{company_id}")
-def update_company(company_id: int, data: CompanyUpdate, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def update_company(company_id: int, data: CompanyUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin/operator 可改公司（rep 只读）"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权修改公司（仅管理员/主席）")
     c = db.query(Company).filter(Company.id == company_id).first()
     if not c: raise HTTPException(404, "公司不存在")
     for k, v in data.model_dump(exclude_unset=True).items():
@@ -69,7 +75,10 @@ def update_company(company_id: int, data: CompanyUpdate, db: Session = Depends(g
     return c
 
 @router.delete("/{company_id}")
-def delete_company(company_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def delete_company(company_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """v1.3.1 审核加固：仅 admin 可停用公司"""
+    if user.role != "admin":
+        raise HTTPException(403, "无权停用公司（仅管理员）")
     c = db.query(Company).filter(Company.id == company_id).first()
     if not c: raise HTTPException(404, "公司不存在")
     c.is_active = 0
