@@ -46,7 +46,8 @@ def login(req: LoginReq, db: Session = Depends(get_db)):
     db.commit()
     token = create_access_token(user.id, user.username, user.role)
     # 公司绑定对齐：返回 org_id（用户归属组织，与桌面端 company_id 对应）
-    return {"token": token, "user": {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id, "company_ids": user.company_ids}}
+    return {"token": token, "user": {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id, "company_ids": user.company_ids,
+                                      "stock_adjustable": getattr(user, "stock_adjustable", 1)}}
 
 
 @router.post("/logout")
@@ -84,6 +85,8 @@ class CreateUserReq(BaseModel):
     org_ids: Optional[List[int]] = None
     # 兼容：company_ids 列表（公司 id，内部映射到 org_id；桌面端多选传公司 id）
     company_ids: Optional[List[int]] = None
+    # v1.3.1-3 股票账户类型：1=可修改（代表账户）/ 0=不可修改（主席审计账户 100 万锁定），默认可修改
+    stock_adjustable: Optional[int] = 1
 
 
 class ResetPasswordReq(BaseModel):
@@ -124,7 +127,8 @@ def create_user(data: CreateUserReq, db: Session = Depends(get_db),
             raise HTTPException(400, f"所属公司不存在: {invalid}")
     user = User(username=data.username, password=hash_password(data.password),
                 role=data.role,
-                org_id=data.org_id)
+                org_id=data.org_id,
+                stock_adjustable=1 if data.stock_adjustable is None else (1 if data.stock_adjustable else 0))
     db.add(user)
     commit_with_retry(db)
     # 多公司绑定：写入 user_companies（org_ids 是组织 id，需映射到 company_id）
@@ -135,7 +139,8 @@ def create_user(data: CreateUserReq, db: Session = Depends(get_db),
                 db.add(UserCompany(user_id=user.id, company_id=comp[0]))
         commit_with_retry(db)
     return {"id": user.id, "username": user.username, "role": user.role,
-            "org_id": user.org_id, "org_ids": org_ids or []}
+            "org_id": user.org_id, "org_ids": org_ids or [],
+            "stock_adjustable": user.stock_adjustable}
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -211,4 +216,5 @@ def change_password(req: ChangePasswordReq, user: User = Depends(get_current_use
 
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
-    return {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id}
+    return {"id": user.id, "username": user.username, "role": user.role, "org_id": user.org_id,
+            "stock_adjustable": getattr(user, "stock_adjustable", 1)}

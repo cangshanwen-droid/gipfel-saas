@@ -204,6 +204,8 @@ class User(Base):
     salt = Column(String, default="")
     role = Column(String, default="user")  # admin / user
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, default=None)
+    # v1.3.1-3 股票账户类型：1=可用资金可修改（代表账户）/ 0=不可修改（主席审计账户，初始100万锁定）
+    stock_adjustable = Column(Integer, default=1)
     last_login = Column(String, nullable=True)  # 最近登录时间（系统概览活跃用户统计）
     created_at = Column(DateTime, default=datetime.utcnow)
 
