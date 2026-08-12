@@ -99,14 +99,15 @@ class BatchApproveReq(BaseModel):
     operator: Optional[str] = None
 
 
-# ── 常量与状态机（v1.3.1 金融化：草稿/有效/执行中/完成/终止，无审批）──
-CONTRACT_STATUSES = ["draft", "active", "executing", "completed", "terminated"]
+# ── 常量与状态机（v1.3.1-5 用户拍板：新建即上传 active，可驳回 rejected；无审批流）──
+CONTRACT_STATUSES = ["draft", "active", "executing", "completed", "terminated", "rejected"]
 STATUS_TRANSITIONS = {
-    "draft": ["active", "terminated"],
-    "active": ["executing", "terminated"],
-    "executing": ["completed", "terminated"],
+    "draft": ["active", "terminated", "rejected"],
+    "active": ["executing", "terminated", "rejected"],
+    "executing": ["completed", "terminated", "rejected"],
     "completed": [],
     "terminated": [],
+    "rejected": [],
 }
 
 VERSION_SNAPSHOT_FIELDS = [
@@ -614,6 +615,10 @@ def create_contract(data: ContractCreate, db: Session = Depends(get_db), user: U
                              new_value=json.dumps({"contract_no": contract_no, "contract_name": data.contract_name}, ensure_ascii=False))
 
             # P1-3：WAL + busy_timeout 兜底，极端并发提交冲突时退避重试（2 次）
+            # v1.3.1-5 用户拍板：上传成功自动发通知（告诉本账号）
+            notify_user_by_username(db, user.username, "合同上传成功",
+                                    f"合同「{contract.contract_name}」（{contract_no}）已上传成功",
+                                    "contract", f"/contracts")
             _cwr(db)
             db.refresh(contract)
             return _contract_row(db, contract)
@@ -809,6 +814,40 @@ def approve_contract(contract_id: int, data: ApproveReq, db: Session = Depends(g
                      new_value=json.dumps({"status": c.status, "approval_status": c.approval_status}, ensure_ascii=False))
     _notify_approval(db, c, data.action)
 
+    commit_with_retry(db)
+    db.refresh(c)
+    return _contract_row(db, c)
+
+
+@router.post("/{contract_id}/reject")
+def reject_contract(contract_id: int, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """v1.3.1-5 用户拍板：驳回合同（发现写错可取消）。
+    仅 admin/operator 可驳回（rep 只读）；operator 仅本公司合同；
+    已驳回/已完成/已终止的合同不可重复驳回。驳回后自动发通知（告诉本账号）。"""
+    if user.role not in ("admin", "operator"):
+        raise HTTPException(403, "无权驳回合同（仅管理员/运营可驳回）")
+    c = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not c:
+        raise HTTPException(404, "合同不存在")
+    # 公司归属校验（operator 仅本公司）
+    _assert_contract_access(db, user, c)
+    if c.status == "rejected":
+        raise HTTPException(400, "该合同已驳回，无需重复操作")
+    if c.status in ("completed", "terminated"):
+        raise HTTPException(400, f"已{c.status}的合同不可驳回")
+    before_row = _contract_row(db, c)
+    c.status = "rejected"
+    c.updated_by = user.username
+    _save_version_snapshot(db, contract_id, before_row, ["驳回合同"], user.username)
+    insert_audit_log(db, username=user.username, role=user.role, action="reject", target="contract",
+                     target_id=contract_id,
+                     old_value=json.dumps({"status": before_row.get("status")}, ensure_ascii=False),
+                     new_value=json.dumps({"status": "rejected"}, ensure_ascii=False))
+    # v1.3.1-5 驳回后自动发通知（告诉本账号）
+    notify_user_by_username(db, user.username, "合同已驳回",
+                            f"合同「{c.contract_name}」（{c.contract_no}）已驳回取消",
+                            "contract", f"/contracts")
     commit_with_retry(db)
     db.refresh(c)
     return _contract_row(db, c)
