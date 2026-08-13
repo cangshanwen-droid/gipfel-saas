@@ -71,8 +71,9 @@ def accounts_summary(db: Session = Depends(get_db), user: User = Depends(get_cur
     if user.role == "rep":
         accounts = [a for a in accounts if a.region_id in _user_region_ids(db, user)]
     rows = _with_region_name(db, accounts)
-    total_balance = sum((a.balance or 0) for a in rows)
-    region_count = sum(1 for a in rows if not a.is_master)
+    # _with_region_name 返回 dict 列表——用 .get() 访问（修复 AttributeError 500）
+    total_balance = sum((a.get("balance") or 0) for a in rows)
+    region_count = sum(1 for a in rows if not a.get("is_master"))
     return {"accounts": rows, "total_balance": total_balance, "region_count": region_count}
 
 
