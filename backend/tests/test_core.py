@@ -217,8 +217,8 @@ if __name__ == "__main__":
 
 # ═══ 7. 合同审批入账原子性（回归：曾 ORM 读改写丢更新）═══
 class TestContractAccountAtomic:
-    def test_concurrent_contract_approvals_balance_exact(self):
-        """两个合同同时审批执行 → 区域账户余额精确扣减（无丢更新）"""
+    def test_contract_approval_does_not_mutate_manual_finance(self):
+        """Contracts and regional finance are intentionally independent."""
         from concurrent.futures import ThreadPoolExecutor
         h = login()
         # 建 2 个合同（小金额）
@@ -249,17 +249,13 @@ class TestContractAccountAtomic:
 
         r = client.get("/api/accounts", headers=h)
         bal1 = float(next(a["balance"] for a in r.json() if a["id"] == aid))
-        # 每合同 total_cost = 1*1000*1.0 = 1000，两笔支出 2000
-        expect = round(bal0 - 2000, 2)
-        assert abs(bal1 - expect) < 0.01, f"合同入账丢更新: {bal0}→{bal1} 期望 {expect}"
+        # Product rule: contract upload/approval never creates an implicit
+        # regional-account transaction. Finance is entered explicitly.
+        assert abs(bal1 - bal0) < 0.01, f"合同流程不应自动改动资金: {bal0}→{bal1}"
 
         # 清理
         for cid in ids:
             client.delete(f"/api/contracts/{cid}", headers=h)
-        # 冲回余额
-        client.post("/api/accounts/transactions", headers=h, json={
-            "account_id": aid, "trans_type": "income", "category": "测试恢复",
-            "amount": round(bal0 - bal1, 2), "description": "pytest-contract-restore"})
 
 
 # ═══ 8. 资金桥并发幂等（回归：曾内存字典竞态致并发同 key 双扣）═══

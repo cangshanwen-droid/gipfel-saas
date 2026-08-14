@@ -51,12 +51,18 @@ def commit_with_retry(db, max_retries=2, base_delay=0.05):
     改为仅回滚到 savepoint 前状态不可行（SQLAlchemy 无内建），故直接重试
     commit（WAL busy 时同一事务数据仍在，重试可成功）；全部失败抛异常。"""
     import time
+    from sqlalchemy.exc import OperationalError
 
     for attempt in range(max_retries + 1):
         try:
             db.commit()
             return
-        except Exception:
+        except OperationalError as exc:
+            # Only a transient SQLite lock can be retried on the same
+            # transaction. Constraint and flush errors must reach the route
+            # so it can rollback and apply its idempotency/conflict policy.
+            if "locked" not in str(exc).lower():
+                raise
             if attempt >= max_retries:
                 raise
             # P0-4：不 rollback（保数据）；仅退避后重试 commit

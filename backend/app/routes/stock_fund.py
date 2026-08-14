@@ -125,6 +125,7 @@ def stock_fund_transaction(req_body: dict,
         return _STOCK_FUND_KEYS[idem_key]
 
     user, acct = _resolve_region_account(db, username)
+    account_id = acct.id
     trans_type = "expense" if side == "buy" else "income"
     category = "股票买入" if side == "buy" else "股票卖出"
 
@@ -161,8 +162,10 @@ def stock_fund_transaction(req_body: dict,
         existing = db.query(AccountTransaction).filter(
             AccountTransaction.idempotency_key == idem_key).first()
         if existing:
-            return {"success": True, "balance": round(float(acct.balance or 0), 2),
-                    "account_id": acct.id, "idempotency_key": idem_key,
+            current_balance = db.query(RegionAccount.balance).filter(
+                RegionAccount.id == account_id).scalar() or 0
+            return {"success": True, "balance": round(float(current_balance), 2),
+                    "account_id": account_id, "idempotency_key": idem_key,
                     "deduplicated": True}
         raise HTTPException(500, "资金处理冲突，请重试")
     db.refresh(acct)
