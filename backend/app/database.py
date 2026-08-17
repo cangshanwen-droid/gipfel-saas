@@ -109,3 +109,17 @@ def init_db():
     from .models import all_models  # noqa: F401 — 注册所有模型
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
+    # 公司区域与上市资料是业务 API → 股票 API 的映射依据；为存量公司补 region_id。
+    from .models import Company, Region
+    db = SessionLocal()
+    try:
+        regions = {region.name: region.id for region in db.query(Region).all()}
+        changed = False
+        for company in db.query(Company).all():
+            if company.region_id is None and company.region in regions:
+                company.region_id = regions[company.region]
+                changed = True
+        if changed:
+            db.commit()
+    finally:
+        db.close()

@@ -61,6 +61,7 @@ def calculate(req: CalcRequest, db: Session = Depends(get_db), _=Depends(get_cur
         region.current_happiness = output.happiness
         region.current_employment_rate = output.total_employment_rate
         region.population = round(output.next_population)
+        region.carbon_emissions = output.total_carbon
 
     db.commit()
     return output.__dict__

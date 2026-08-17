@@ -28,8 +28,38 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.database import get_db, init_db, SessionLocal
 from app.models.all_models import Base
+from app.services.formula import calculate_formulas, FormulaInput
 
 client = TestClient(app)
+
+
+class TestFormulaConsistency:
+    def test_carbon_total_and_happiness_direction(self):
+        base = dict(
+            population=1000, talent_population=100, supply_quantity=100,
+            demand_quantity=100, prev_avg_price=10, current_avg_price=11,
+            base_cost=10, base_profit=2, infra_employment_bonuses=[],
+            infra_population_delta=0, population_capacity=5000,
+            base_growth_rate=0.03, infra_carbon_reduction=200,
+        )
+        lower = calculate_formulas(FormulaInput(carbon_emissions=100, **base))
+        higher = calculate_formulas(FormulaInput(carbon_emissions=2000, **base))
+        assert higher.happiness < lower.happiness
+        assert higher.total_carbon == 1800
+        assert abs(lower.happiness - 11.0413926852) < 1e-8
+        assert abs(higher.happiness - 7.4413926852) < 1e-8
+
+
+class TestContractTypeDictionary:
+    def test_contract_type_ids_and_names_are_stable(self):
+        headers = login()
+        response = client.get("/api/contracts/types/all", headers=headers)
+        assert response.status_code == 200
+        rows = response.json()
+        assert [(row["id"], row["name"]) for row in rows] == [
+            (1, "基建合同"), (2, "开采合同"), (3, "采购合同"), (4, "劳动力雇佣合同"),
+            (5, "投资合同"), (6, "拨款合同"), (7, "销售合同"), (8, "减碳合同"),
+        ]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -178,6 +208,20 @@ class TestCompanyOrgSync:
         comp = next((c for c in r.json() if c["id"] == co_id), None)
         assert comp is not None
         client.delete(f"/api/companies/{co_id}", headers=h)
+
+    def test_company_region_and_listing_fields_persist(self):
+        h = login()
+        response = client.post("/api/companies", headers=h, json={
+            "name": "pytest上市公司", "region": "A区", "region_id": 1,
+            "company_type": "投资方", "is_listed": 1,
+            "stock_symbol": "PYTEST", "stock_initial_price": 88.5,
+        })
+        assert response.status_code in (200, 201)
+        company = response.json()
+        assert company["region_id"] == 1
+        assert company["is_listed"] == 1
+        assert company["stock_symbol"] == "PYTEST"
+        client.delete(f"/api/companies/{company['id']}", headers=h)
 
 
 # ═══ 5. 公司过滤（数据隔离）═══

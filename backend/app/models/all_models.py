@@ -30,6 +30,7 @@ class Company(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
     region = Column(String, default="")
+    region_id = Column(Integer, ForeignKey("regions.id"), nullable=True, default=None)
     company_type = Column(String, default="")
     contact = Column(String, default="")
     phone = Column(String, default="")
@@ -40,6 +41,9 @@ class Company(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, default=None)
+    is_listed = Column(Integer, default=0)
+    stock_symbol = Column(String, default="")
+    stock_initial_price = Column(Float, default=100)
 
     __table_args__ = (Index("idx_companies_region", "region"),)
 

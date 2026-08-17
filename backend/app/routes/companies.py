@@ -12,16 +12,21 @@ router = APIRouter()
 class CompanyCreate(BaseModel):
     name: str
     region: str = ""
+    region_id: Optional[int] = None
     company_type: str = ""
     contact: str = ""
     phone: str = ""
     email: str = ""
     address: str = ""
     notes: str = ""
+    is_listed: int = 0
+    stock_symbol: str = ""
+    stock_initial_price: float = 100
 
 class CompanyUpdate(BaseModel):
     name: Optional[str] = None
     region: Optional[str] = None
+    region_id: Optional[int] = None
     company_type: Optional[str] = None
     contact: Optional[str] = None
     phone: Optional[str] = None
@@ -29,6 +34,9 @@ class CompanyUpdate(BaseModel):
     address: Optional[str] = None
     notes: Optional[str] = None
     is_active: Optional[int] = None
+    is_listed: Optional[int] = None
+    stock_symbol: Optional[str] = None
+    stock_initial_price: Optional[float] = None
 
 @router.get("")
 def list_companies(db: Session = Depends(get_db), _=Depends(get_current_user)):

@@ -63,11 +63,12 @@ def calculate_formulas(input: FormulaInput) -> FormulaOutput:
     market_demand = price_sensitivity * input.population
 
     # 碳排放计算
-    population_carbon = input.population * 10
+    # 区域的 carbon_emissions 已是统一总值，不再按人口重复叠加。
+    population_carbon = 0
     extraction_carbon = input.carbon_emissions
     infra_carbon_reduction = input.infra_carbon_reduction or 0
     remaining_extraction_carbon = max(0, extraction_carbon - infra_carbon_reduction)
-    total_carbon = max(2000, population_carbon + remaining_extraction_carbon)
+    total_carbon = max(0, population_carbon + remaining_extraction_carbon)
 
     # 幸福度
     talent_ratio = input.talent_population / input.population if input.population > 0 else 0
@@ -76,7 +77,7 @@ def calculate_formulas(input: FormulaInput) -> FormulaOutput:
     happiness = (
         0.6 * consumer_satisfaction +
         0.1 * math.log10(input.population + 100) +
-        2 * talent_ratio +
+        2 * talent_ratio -
         0.2 * carbon_per_capita
     )
     clamped_happiness = max(1, min(100, happiness * 10))
